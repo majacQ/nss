@@ -118,6 +118,20 @@ ifneq (,$(USE_64)$(USE_X32))
 else
         DEFINES += -DNSS_X86
 endif
+    ifdef CC_IS_CLANG
+        EXTRA_SRCS += sha256-x86.c
+        DEFINES += -DUSE_HW_SHA2
+    else ifeq (1,$(CC_IS_GCC))
+        # Old compiler doesn't support Intel SHA extension
+        ifneq (,$(filter 4.9,$(word 1,$(GCC_VERSION)).$(word 2,$(GCC_VERSION))))
+            EXTRA_SRCS += sha256-x86.c
+            DEFINES += -DUSE_HW_SHA2
+        endif
+        ifeq (,$(filter 0 1 2 3 4,$(word 1,$(GCC_VERSION))))
+            EXTRA_SRCS += sha256-x86.c
+            DEFINES += -DUSE_HW_SHA2
+        endif
+    endif
 endif
 ifeq ($(CPU_ARCH),aarch64)
     ifdef CC_IS_CLANG
@@ -161,11 +175,6 @@ endif
     endif
 endif
 
-ifeq ($(OS_TARGET),OSF1)
-    DEFINES += -DMP_ASSEMBLY_MULTIPLY -DMP_NO_MP_WORD
-    MPI_SRCS += mpvalpha.c
-endif
-
 ifeq (OS2,$(OS_TARGET))
     ASFILES  = mpi_x86_os2.s
     DEFINES += -DMP_ASSEMBLY_MULTIPLY -DMP_ASSEMBLY_SQUARE
@@ -204,6 +213,11 @@ else
 	    INTEL_GCM_CLANG_CL = 1
 	endif
     endif
+    # The Intel SHA extenstion requires Visual C++ 2015.
+    ifeq ($(_MSC_VER_GE_14),1)
+        DEFINES += -DUSE_HW_SHA2
+        EXTRA_SRCS += sha256-x86.c
+    endif
 endif
 else
     # -DMP_NO_MP_WORD
@@ -230,22 +244,14 @@ ifeq ($(CPU_ARCH),x86_64)
 	    INTEL_GCM_CLANG_CL = 1
 	endif
     endif
+    # The Intel SHA extenstion requires Visual C++ 2015.
+    ifeq ($(_MSC_VER_GE_14),1)
+        DEFINES += -DUSE_HW_SHA2
+        EXTRA_SRCS += sha256-x86.c
+    endif
     MPI_SRCS += mpi_amd64.c
 endif
 endif
-endif
-endif
-
-ifeq ($(OS_TARGET),IRIX)
-ifeq ($(USE_N32),1)
-    ASFILES  = mpi_mips.s
-    ifeq ($(NS_USE_GCC),1)
-	ASFLAGS = -Wp,-P -Wp,-traditional -O -mips3
-    else
-	ASFLAGS = -O -OPT:Olimit=4000 -dollar -fullwarn -xansi -n32 -mips3
-    endif
-    DEFINES += -DMP_ASSEMBLY_MULTIPLY -DMP_ASSEMBLY_SQUARE
-    DEFINES += -DMP_USE_UINT_DIGIT
 endif
 endif
 
@@ -635,7 +641,7 @@ INCLUDES += -Impi -Iecl -Iverified -Iverified/kremlin/include -Iverified/kremlin
 
 DEFINES += -DMP_API_COMPATIBLE
 
-MPI_USERS = dh.c pqg.c dsa.c rsa.c ec.c
+MPI_USERS = secmpi.c dh.c pqg.c dsa.c rsa.c ec.c
 
 MPI_OBJS = $(addprefix $(OBJDIR)/$(PROG_PREFIX), $(MPI_SRCS:.c=$(OBJ_SUFFIX)))
 MPI_OBJS += $(addprefix $(OBJDIR)/$(PROG_PREFIX), $(MPI_USERS:.c=$(OBJ_SUFFIX)))
@@ -739,6 +745,8 @@ ifdef INTEL_GCM_CLANG_CL
 #
 $(OBJDIR)/$(PROG_PREFIX)intel-gcm-wrap$(OBJ_SUFFIX): CFLAGS += -mssse3
 endif
+
+$(OBJDIR)/$(PROG_PREFIX)sha256-x86$(OBJ_SUFFIX): CFLAGS += -msha -mssse3 -msse4.1
 
 ifeq ($(CPU_ARCH),arm)
 # When the compiler uses the softfloat ABI, we want to use the compatible softfp ABI when
