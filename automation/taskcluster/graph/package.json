@@ -15,10 +15,20 @@
     "babel-runtime": "^6.11.6",
     "flatmap": "0.0.3",
     "intersect": "^1.0.1",
+  <<<<<<< snyk-upgrade-d27eed52172738cf970e20b2ad5b9cb8
     "js-yaml": "^3.6.1",
+    "merge": "^2.1.1",
+  =======
+    "js-yaml": "^4.1.0",
     "merge": "^1.2.0",
+  >>>>>>> master
     "minimist": "^1.2.0",
+  <<<<<<< snyk-upgrade-bb82457fa05dbb25dc4b35e9c79ee69a
     "slugid": "^3.0.0",
     "taskcluster-client": "^22.0.0"
+  =======
+    "slugid": "^1.1.0",
+    "taskcluster-client": "^44.2.2"
+  >>>>>>> master
   }
 }
