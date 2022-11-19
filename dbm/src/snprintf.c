@@ -1,25 +1,29 @@
+#ifndef HAVE_SNPRINTF
+
 #include "watcomfx.h"
 #include <sys/types.h>
 #include <stddef.h>
 #include <stdio.h>
-#if defined(_WINDOWS) || defined(SOLARIS) || defined(AIXV3) || defined(AIX) || defined(OSF1) || defined(NEC)
-#include "cdefs.h"
-#elif !defined(HPUX) && !defined(UNIXWARE) && !defined(SNI)
+
+#ifdef HAVE_SYS_CDEFS_H
 #include <sys/cdefs.h>
+#else
+#include "cdefs.h"
 #endif
 
 #include "prtypes.h"
 
 #include <ncompat.h>
 
-#ifdef __STDC__
+/* The OS/2 VAC compiler doesn't appear to define __STDC__ and won't let us define it either */
+#if defined(__STDC__) || defined(XP_OS2_VACPP)
 #include <stdarg.h>
 #else
 #include <varargs.h>
 #endif
 
 int
-#ifdef __STDC__
+#if defined(__STDC__) || defined(XP_OS2_VACPP)
 snprintf(char *str, size_t n, const char *fmt, ...)
 #else
 snprintf(str, n, fmt, va_alist)
@@ -35,7 +39,7 @@ snprintf(str, n, fmt, va_alist)
 #else
 	int rval;
 #endif
-#ifdef __STDC__
+#if defined(__STDC__) || defined(XP_OS2_VACPP)
 	va_start(ap, fmt);
 #else
 	va_start(ap);
@@ -64,3 +68,8 @@ vsnprintf(str, n, fmt, ap)
 	return (vsprintf(str, fmt, ap));
 #endif
 }
+
+#endif /* HAVE_SNPRINTF */
+
+/* Some compilers don't like an empty source file. */
+static int dummy = 0;

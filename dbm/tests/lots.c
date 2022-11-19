@@ -1,20 +1,40 @@
-/* -*- Mode: C; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+/* -*- Mode: C; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* ***** BEGIN LICENSE BLOCK *****
+ * Version: NPL 1.1/GPL 2.0/LGPL 2.1
  *
  * The contents of this file are subject to the Netscape Public License
- * Version 1.0 (the "NPL"); you may not use this file except in
- * compliance with the NPL.  You may obtain a copy of the NPL at
+ * Version 1.1 (the "License"); you may not use this file except in
+ * compliance with the License. You may obtain a copy of the License at
  * http://www.mozilla.org/NPL/
  *
- * Software distributed under the NPL is distributed on an "AS IS" basis,
- * WITHOUT WARRANTY OF ANY KIND, either express or implied. See the NPL
+ * Software distributed under the License is distributed on an "AS IS" basis,
+ * WITHOUT WARRANTY OF ANY KIND, either express or implied. See the License
  * for the specific language governing rights and limitations under the
- * NPL.
+ * License.
  *
- * The Initial Developer of this code under the NPL is Netscape
- * Communications Corporation.  Portions created by Netscape are
- * Copyright (C) 1998 Netscape Communications Corporation.  All Rights
- * Reserved.
- */
+ * The Original Code is mozilla.org code.
+ *
+ * The Initial Developer of the Original Code is 
+ * Netscape Communications Corporation.
+ * Portions created by the Initial Developer are Copyright (C) 1998
+ * the Initial Developer. All Rights Reserved.
+ *
+ * Contributor(s):
+ *
+ *
+ * Alternatively, the contents of this file may be used under the terms of
+ * either the GNU General Public License Version 2 or later (the "GPL"), or
+ * the GNU Lesser General Public License Version 2.1 or later (the "LGPL"),
+ * in which case the provisions of the GPL or the LGPL are applicable instead
+ * of those above. If you wish to allow use of your version of this file only
+ * under the terms of either the GPL or the LGPL, and not to allow others to
+ * use your version of this file under the terms of the NPL, indicate your
+ * decision by deleting the provisions above and replace them with the notice
+ * and other provisions required by the GPL or the LGPL. If you do not delete
+ * the provisions above, a recipient may use your version of this file under
+ * the terms of any one of the NPL, the GPL or the LGPL.
+ *
+ * ***** END LICENSE BLOCK ***** */
 
 /* use sequental numbers printed to strings
  * to store lots and lots of entries in the
@@ -37,14 +57,18 @@
  * int32 in the data.
  */
 
-#include <stdio.h> 
+#include <stdio.h>
+
 #include <stdlib.h>
-#ifdef STDARG
+#ifdef STDC_HEADERS
 #include <stdarg.h>
 #else
 #include <varargs.h>
 #endif
+
+#ifdef HAVE_MEMORY_H
 #include <memory.h>
+#endif
 #include <string.h>
 #include <assert.h>
 #include "mcom_db.h"
@@ -78,7 +102,7 @@ ReportStatus(char *string, ...)
 {
     va_list args;
 
-#ifdef STDARG
+#ifdef STDC_HEADERS
     va_start(args, string);
 #else
     va_start(args);
@@ -96,7 +120,7 @@ ReportError(char *string, ...)
 {
     va_list args;
 
-#ifdef STDARG
+#ifdef STDC_HEADERS
     va_start(args, string);
 #else
     va_start(args);
@@ -115,7 +139,7 @@ DBT * MakeLargeKey(int32 num)
 	static DBT rv;
 	static char *string_rv=0;
 	int rep_char;
-	int32 size;
+	size_t size;
 
 	if(string_rv)
 		free(string_rv);
@@ -147,7 +171,7 @@ DBT * MakeSmallKey(int32 num)
 
 	rv.data = data_string;
 
-	sprintf(data_string, "%ld", num);
+	sprintf(data_string, "%ld", (long)num);
 	rv.size = strlen(data_string);
 
 	return(&rv);
@@ -199,7 +223,7 @@ int
 VerifyData(DBT *data, int32 num, key_type_enum key_type)
 {
 	int32 count, compare_num;
-	uint32 size;
+	size_t size;
 	int32 *int32_array;
 
 	/* The first int32 is count 
@@ -247,7 +271,6 @@ VerifyData(DBT *data, int32 num, key_type_enum key_type)
 int
 VerifyRange(int32 low, int32 high, int32 should_exist, key_type_enum key_type)
 {
-	char key_buf[128];
 	DBT *key, data;
 	int32 num;
 	int status;
@@ -304,7 +327,7 @@ GenData(int32 num)
 	int32 n;
 	static DBT *data=0;
 	int32 *int32_array;
-	int32 size;
+	size_t size;
 
 	if(!data)
 	  {
@@ -344,9 +367,10 @@ GenData(int32 num)
 int
 AddOrDelRange(int32 low, int32 high, int action, key_type_enum key_type)
 {
-	char key_buf[128];
 	DBT *key, *data;
+#if 0 /* only do this if your really analy checking the puts */
 	DBT tmp_data;
+#endif 
 	int32 num;
 	int status;
 

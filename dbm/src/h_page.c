@@ -66,16 +66,21 @@ static char sccsid[] = "@(#)hash_page.c	8.7 (Berkeley) 8/16/94";
 #include <sys/types.h>
 #endif
 
+#if defined(macintosh)
+#include <unistd.h>
+#endif
+
 #include <errno.h>
-#ifndef macintosh
 #include <fcntl.h>
+#if defined(_WIN32) || defined(_WINDOWS) 
+#include <io.h>
 #endif
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#if !defined(_WIN32) && !defined(_WINDOWS) && !defined(macintosh)
+#if !defined(_WIN32) && !defined(_WINDOWS) && !defined(macintosh) && !defined(XP_OS2_VACPP)
 #include <unistd.h>
 #endif
 
@@ -86,11 +91,7 @@ static char sccsid[] = "@(#)hash_page.c	8.7 (Berkeley) 8/16/94";
 #include "page.h"
 /* #include "extern.h" */
 
-#ifndef NSPR20
-#if defined(__sun)
-# include "sunos4.h"
-#endif /* __sun */
-#endif /* NSPR20 */
+extern int mkstempflags(char *path, int extraFlags);
 
 static uint32	*fetch_bitmap __P((HTAB *, uint32));
 static uint32	 first_free __P((uint32));
@@ -112,9 +113,9 @@ static int	 ugly_split
  */
 long new_lseek(int fd, long offset, int origin)
 {
- 	long cur_pos;
+ 	long cur_pos=0;
 	long end_pos=0;
-	long seek_pos;
+	long seek_pos=0;
 
 	if(origin == SEEK_CUR)
       {	
@@ -165,7 +166,7 @@ long new_lseek(int fd, long offset, int origin)
 	   	memset(&buffer, 0, 1024);
 	   	while(len > 0)
 	      {
-	        write(fd, (char*)&buffer, (1024 > len ? len : 1024));
+	        write(fd, (char*)&buffer, (size_t)(1024 > len ? len : 1024));
 		    len -= 1024;
 		  }
 		return(lseek(fd, seek_pos, SEEK_SET));
@@ -291,7 +292,8 @@ __split_page(HTAB *hashp, uint32 obucket, uint32 nbucket)
 	DBT key, val;
     uint16 n, ndx;
 	int retval;
-	uint16 copyto, diff, off, moved;
+	uint16 copyto, diff, moved;
+	size_t off;
 	char *op;
 
 	copyto = (uint16)hashp->BSIZE;
@@ -690,7 +692,8 @@ __get_page(HTAB *hashp,
 	int is_disk, 
 	int is_bitmap)
 {
-	register int fd, page, size;
+	register int fd, page;
+	size_t size;
 	int rsize;
 	uint16 *bp;
 
@@ -713,7 +716,7 @@ __get_page(HTAB *hashp,
 	if (!rsize)
 		bp[0] = 0;	/* We hit the EOF, so initialize a new page */
 	else
-		if (rsize != size) {
+		if ((unsigned)rsize != size) {
 			errno = EFTYPE;
 			return (-1);
 		}
@@ -754,7 +757,7 @@ __get_page(HTAB *hashp,
 	     		 * the maximum number of entries
 	     		 * in the array
 	     		 */
-				if(max > (size / sizeof(uint16)))
+				if((unsigned)max > (size / sizeof(uint16)))
 					return(DATABASE_CORRUPTED_ERROR);
 
 				/* do the byte order swap
@@ -825,8 +828,10 @@ __get_page(HTAB *hashp,
 extern int
 __put_page(HTAB *hashp, char *p, uint32 bucket, int is_bucket, int is_bitmap)
 {
-	register int fd, page, size;
+	register int fd, page;
+	size_t size;
 	int wsize;
+	off_t offset;
 
 	size = hashp->BSIZE;
 	if ((hashp->fp == -1) && open_temp(hashp))
@@ -848,7 +853,7 @@ __put_page(HTAB *hashp, char *p, uint32 bucket, int is_bucket, int is_bitmap)
              * the maximum number of entries
              * in the array
              */
-            if(max > (size / sizeof(uint16)))
+            if((unsigned)max > (size / sizeof(uint16)))
                 return(DATABASE_CORRUPTED_ERROR);
 
 			for (i = 0; i <= max; i++)
@@ -861,15 +866,20 @@ __put_page(HTAB *hashp, char *p, uint32 bucket, int is_bucket, int is_bitmap)
 		page = BUCKET_TO_PAGE(bucket);
 	else
 		page = OADDR_TO_PAGE(bucket);
-	if ((MY_LSEEK(fd, (off_t)page << hashp->BSHIFT, SEEK_SET) == -1) ||
+	offset = (off_t)page << hashp->BSHIFT;
+	if ((MY_LSEEK(fd, offset, SEEK_SET) == -1) ||
 	    ((wsize = write(fd, p, size)) == -1))
 		/* Errno is set */
 		return (-1);
-	if (wsize != size) {
+	if ((unsigned)wsize != size) {
 		errno = EFTYPE;
 		return (-1);
 	}
-
+#if defined(_WIN32) || defined(_WINDOWS) 
+	if (offset + size > hashp->file_size) {
+		hashp->updateEOF = 1;
+	}
+#endif
 	/* put the page back the way it was so that it isn't byteswapped
 	 * if it remains in memory - LJM
 	 */
@@ -910,9 +920,9 @@ extern int
 __ibitmap(HTAB *hashp, int pnum, int nbits, int ndx)
 {
 	uint32 *ip;
-	int clearbytes, clearints;
+	size_t clearbytes, clearints;
 
-	if ((ip = (uint32 *)malloc(hashp->BSIZE)) == NULL)
+	if ((ip = (uint32 *)malloc((size_t)hashp->BSIZE)) == NULL)
 		return (1);
 	hashp->nmaps++;
 	clearints = ((nbits - 1) >> INT_BYTE_SHIFT) + 1;
@@ -960,16 +970,16 @@ overflow_page(HTAB *hashp)
 
 	/* Look through all the free maps to find the first free block */
 	first_page = hashp->LAST_FREED >>(hashp->BSHIFT + BYTE_SHIFT);
-	for ( i = first_page; i <= free_page; i++ ) {
+	for ( i = first_page; i <= (unsigned)free_page; i++ ) {
 		if (!(freep = (uint32 *)hashp->mapp[i]) &&
 		    !(freep = fetch_bitmap(hashp, i)))
 			return (0);
-		if (i == free_page)
+		if (i == (unsigned)free_page)
 			in_use_bits = free_bit;
 		else
 			in_use_bits = (hashp->BSIZE << BYTE_SHIFT) - 1;
 		
-		if (i == first_page) {
+		if (i == (unsigned)first_page) {
 			bit = hashp->LAST_FREED &
 			    ((hashp->BSIZE << BYTE_SHIFT) - 1);
 			j = bit / BITS_PER_MAP;
@@ -1078,7 +1088,7 @@ found:
 		hashp->LAST_FREED = bit - 1;
 
 	/* Calculate the split number for this page */
-	for (i = 0; (i < splitnum) && (bit > hashp->SPARES[i]); i++) {}
+	for (i = 0; (i < (unsigned)splitnum) && (bit > hashp->SPARES[i]); i++) {}
 	offset = (i ? bit - hashp->SPARES[i - 1] : bit);
 	if (offset >= SPLITMASK)
 		return (0);	/* Out of overflow pages */
@@ -1113,7 +1123,7 @@ __free_ovflpage(HTAB *hashp, BUFHEAD *obufp)
 	ndx = (((uint16)addr) >> SPLITSHIFT);
 	bit_address =
 	    (ndx ? hashp->SPARES[ndx - 1] : 0) + (addr & SPLITMASK) - 1;
-	 if (bit_address < hashp->LAST_FREED)
+	if (bit_address < (uint32)hashp->LAST_FREED)
 		hashp->LAST_FREED = bit_address;
 	free_page = (bit_address >> (hashp->BSHIFT + BYTE_SHIFT));
 	free_bit = bit_address & ((hashp->BSIZE << BYTE_SHIFT) - 1);
@@ -1149,10 +1159,19 @@ __free_ovflpage(HTAB *hashp, BUFHEAD *obufp)
 static int
 open_temp(HTAB *hashp)
 {
+#ifdef XP_OS2
+ 	hashp->fp = mkstemp(NULL);
+#else
 #if !defined(_WIN32) && !defined(_WINDOWS) && !defined(macintosh)
 	sigset_t set, oset;
 #endif
-	static char namestr[] = "_hashXXXXXX";
+#if !defined(macintosh)
+	char * tmpdir;
+	size_t len;
+	char last;
+#endif
+	static const char namestr[] = "/_hashXXXXXX";
+	char filename[1024];
 
 #if !defined(_WIN32) && !defined(_WINDOWS) && !defined(macintosh)
 	/* Block signals; make sure file goes away at process exit. */
@@ -1160,16 +1179,47 @@ open_temp(HTAB *hashp)
 	(void)sigprocmask(SIG_BLOCK, &set, &oset);
 #endif
 
-	if ((hashp->fp = mkstemp(namestr)) != -1) {
-		(void)unlink(namestr);
-#if !defined(_WIN32) && !defined(_WINDOWS) && !defined(macintosh)
+	filename[0] = 0;
+#if defined(macintosh)
+	strcat(filename, namestr + 1);
+#else
+	tmpdir = getenv("TMP");
+	if (!tmpdir)
+		tmpdir = getenv("TMPDIR");
+	if (!tmpdir)
+		tmpdir = getenv("TEMP");
+	if (!tmpdir)
+		tmpdir = ".";
+	len = strlen(tmpdir);
+	if (len && len < (sizeof filename - sizeof namestr)) {
+		strcpy(filename, tmpdir);
+	}
+	len = strlen(filename);
+	last = tmpdir[len - 1];
+	strcat(filename, (last == '/' || last == '\\') ? namestr + 1 : namestr);
+#endif
+
+#if defined(_WIN32) || defined(_WINDOWS)
+	if ((hashp->fp = mkstempflags(filename, _O_BINARY|_O_TEMPORARY)) != -1) {
+		if (hashp->filename) {
+			free(hashp->filename);
+		}
+		hashp->filename = strdup(filename);
+		hashp->is_temp = 1;
+	}
+#else
+	if ((hashp->fp = mkstemp(filename)) != -1) {
+		(void)unlink(filename);
+#if !defined(macintosh)
 		(void)fcntl(hashp->fp, F_SETFD, 1);
 #endif									  
 	}
+#endif
 
-#if !defined(_WIN32) && !defined(_WINDOWS) && !defined(macintosh) 
+#if !defined(_WIN32) && !defined(_WINDOWS) && !defined(macintosh)
 	(void)sigprocmask(SIG_SETMASK, &oset, (sigset_t *)NULL);
 #endif
+#endif  /* !OS2 */
 	return (hashp->fp != -1 ? 0 : -1);
 }
 
@@ -1205,9 +1255,9 @@ squeeze_key(uint16 *sp, const DBT * key, const DBT * val)
 static uint32 *
 fetch_bitmap(HTAB *hashp, uint32 ndx)
 {
-	if (ndx >= hashp->nmaps)
+	if (ndx >= (unsigned)hashp->nmaps)
 		return (NULL);
-	if ((hashp->mapp[ndx] = (uint32 *)malloc(hashp->BSIZE)) == NULL)
+	if ((hashp->mapp[ndx] = (uint32 *)malloc((size_t)hashp->BSIZE)) == NULL)
 		return (NULL);
 	if (__get_page(hashp,
 	    (char *)hashp->mapp[ndx], hashp->BITMAPS[ndx], 0, 1, 1)) {

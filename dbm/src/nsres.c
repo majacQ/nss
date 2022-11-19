@@ -2,11 +2,9 @@
 
 #include "nsres.h"
 
-#ifdef BSDI
+#include <stdio.h>
+
 #include <stdlib.h>
-#else
-#include <malloc.h>
-#endif
 
 #include <string.h>
 
@@ -47,7 +45,7 @@ int GenKeyData(const char *library, int32 id, DBT *key)
 {
 	char idstr[10];
 	static char * strdata = NULL;
-	int len;
+	size_t len;
 
 	if (strdata)
 		free (strdata);

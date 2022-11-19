@@ -58,7 +58,7 @@ static char sccsid[] = "@(#)hash_bigkey.c	8.3 (Berkeley) 5/31/94";
  *	collect_data
  */
 
-#if !defined(_WIN32) && !defined(_WINDOWS) && !defined(macintosh)
+#if !defined(_WIN32) && !defined(_WINDOWS) && !defined(macintosh) && !defined(XP_OS2_VACPP)
 #include <sys/param.h>
 #endif
 
@@ -76,12 +76,6 @@ static char sccsid[] = "@(#)hash_bigkey.c	8.3 (Berkeley) 5/31/94";
 #include "page.h"
 /* #include "extern.h" */
 
-#ifndef NSPR20
-#if defined(__sun)
-# include "sunos4.h"
-#endif /* __sun */
-#endif /* NSPR20 */
-
 static int collect_key __P((HTAB *, BUFHEAD *, int, DBT *, int));
 static int collect_data __P((HTAB *, BUFHEAD *, int, int));
 
@@ -98,7 +92,7 @@ extern int
 __big_insert(HTAB *hashp, BUFHEAD *bufp, const DBT *key, const DBT *val)
 {
 	register uint16 *p;
-	int key_size, n, val_size;
+	uint key_size, n, val_size;
 	uint16 space, move_bytes, off;
 	char *cp, *key_data, *val_data;
 
@@ -113,7 +107,7 @@ __big_insert(HTAB *hashp, BUFHEAD *bufp, const DBT *key, const DBT *val)
 	/* First move the Key */
 	for (space = FREESPACE(p) - BIGOVERHEAD; key_size;
 	    space = FREESPACE(p) - BIGOVERHEAD) {
-		move_bytes = MIN(space, key_size);
+		move_bytes = PR_MIN(space, key_size);
 		off = OFFSET(p) - move_bytes;
 		memmove(cp + off, key_data, move_bytes);
 		key_size -= move_bytes;
@@ -128,9 +122,9 @@ __big_insert(HTAB *hashp, BUFHEAD *bufp, const DBT *key, const DBT *val)
 		if (!bufp)
 			return (-1);
 		n = p[0];
-		if (!key_size)
+		if (!key_size) {
 			if (FREESPACE(p)) {
-				move_bytes = MIN(FREESPACE(p), val_size);
+				move_bytes = PR_MIN(FREESPACE(p), val_size);
 				off = OFFSET(p) - move_bytes;
 				p[n] = off;
 				memmove(cp + off, val_data, move_bytes);
@@ -141,6 +135,7 @@ __big_insert(HTAB *hashp, BUFHEAD *bufp, const DBT *key, const DBT *val)
 				OFFSET(p) = off;
 			} else
 				p[n - 2] = FULL_KEY;
+		}
 		p = (uint16 *)bufp->page;
 		cp = bufp->page;
 		bufp->flags |= BUF_MOD;
@@ -149,7 +144,7 @@ __big_insert(HTAB *hashp, BUFHEAD *bufp, const DBT *key, const DBT *val)
 	/* Now move the data */
 	for (space = FREESPACE(p) - BIGOVERHEAD; val_size;
 	    space = FREESPACE(p) - BIGOVERHEAD) {
-		move_bytes = MIN(space, val_size);
+		move_bytes = PR_MIN(space, val_size);
 		/*
 		 * Here's the hack to make sure that if the data ends on the
 		 * same page as the key ends, FREESPACE is at least one.
@@ -319,7 +314,7 @@ __find_last_page(HTAB *hashp, BUFHEAD **bpp)
 {
 	BUFHEAD *bufp;
 	uint16 *bp, pageno;
-	int n;
+	uint n;
 
 	bufp = *bpp;
 	bp = (uint16 *)bufp->page;
@@ -434,7 +429,7 @@ __big_return(
 		}
 
 	val->size = collect_data(hashp, bufp, (int)len, set_current);
-	if (val->size == -1)
+	if (val->size == (size_t)-1)
 		return (-1);
 	if (save_p->addr != save_addr) {
 		/* We are pretty short on buffers. */
@@ -477,7 +472,7 @@ collect_data(
 		totlen = len + mylen;
 		if (hashp->tmp_buf)
 			free(hashp->tmp_buf);
-		if ((hashp->tmp_buf = (char *)malloc(totlen)) == NULL)
+		if ((hashp->tmp_buf = (char *)malloc((size_t)totlen)) == NULL)
 			return (-1);
 		if (set) {
 			hashp->cndx = 1;
@@ -505,7 +500,7 @@ collect_data(
 		errno = EINVAL;			/* Out of buffers. */
 		return (-1);
 	}
-	memmove(&hashp->tmp_buf[len], (bufp->page) + bp[1], mylen);
+	memmove(&hashp->tmp_buf[len], (bufp->page) + bp[1], (size_t)mylen);
 	return (totlen);
 }
 
@@ -520,7 +515,7 @@ __big_keydata(
 	int set)
 {
 	key->size = collect_key(hashp, bufp, 0, val, set);
-	if (key->size == -1)
+	if (key->size == (size_t)-1)
 		return (-1);
 	key->data = (uint8 *)hashp->tmp_key;
 	return (0);
@@ -552,7 +547,7 @@ collect_key(
 	if (bp[2] == FULL_KEY || bp[2] == FULL_KEY_DATA) {    /* End of Key. */
 		if (hashp->tmp_key != NULL)
 			free(hashp->tmp_key);
-		if ((hashp->tmp_key = (char *)malloc(totlen)) == NULL)
+		if ((hashp->tmp_key = (char *)malloc((size_t)totlen)) == NULL)
 			return (-1);
 		if (__big_return(hashp, bufp, 1, val, set))
 			return (-1);
@@ -566,7 +561,7 @@ collect_key(
 		errno = EINVAL;		/* MIS -- OUT OF BUFFERS */
 		return (-1);
 	}
-	memmove(&hashp->tmp_key[len], (bufp->page) + bp[1], mylen);
+	memmove(&hashp->tmp_key[len], (bufp->page) + bp[1], (size_t)mylen);
 	return (totlen);
 }
 
@@ -582,7 +577,7 @@ __big_split(
 	BUFHEAD *np,	/* Pointer to new bucket page */
 			/* Pointer to first page containing the big key/data */
 	BUFHEAD *big_keyp,
-	int addr,	/* Address of big_keyp */
+	uint32 addr,	/* Address of big_keyp */
 	uint32   obucket,/* Old Bucket */
 	SPLIT_RETURN *ret)
 {

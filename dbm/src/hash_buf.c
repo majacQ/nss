@@ -55,7 +55,7 @@ static char sccsid[] = "@(#)hash_buf.c	8.5 (Berkeley) 7/15/94";
  * Internal
  *	newbuf
  */
-#if !defined(_WIN32) && !defined(_WINDOWS) && !defined(macintosh)
+#if !defined(_WIN32) && !defined(_WINDOWS) && !defined(macintosh) && !defined(XP_OS2_VACPP)
 #include <sys/param.h>
 #endif
 
@@ -73,12 +73,6 @@ static char sccsid[] = "@(#)hash_buf.c	8.5 (Berkeley) 7/15/94";
 #include "hash.h"
 #include "page.h"
 /* #include "extern.h" */
-
-#ifndef NSPR20
-#if defined(__sun)
-# include "sunos4.h"
-#endif /* __sun */
-#endif /* NSPR20 */
 
 static BUFHEAD *newbuf __P((HTAB *, uint32, BUFHEAD *));
 
@@ -117,8 +111,8 @@ __get_buf(HTAB *hashp, uint32 addr, BUFHEAD *prev_bp, int newpage)
 {
 	register BUFHEAD *bp;
 	register uint32 is_disk_mask;
-	register int is_disk, segment_ndx;
-	SEGMENT segp;
+	register int is_disk, segment_ndx = 0;
+	SEGMENT segp = 0;
 
 	is_disk = 0;
 	is_disk_mask = 0;
@@ -222,7 +216,7 @@ newbuf(HTAB *hashp, uint32 addr, BUFHEAD *prev_bp)
 		 */
 		memset(bp, 0xff, sizeof(BUFHEAD));
 
-		if ((bp->page = (char *)malloc(hashp->BSIZE)) == NULL) {
+		if ((bp->page = (char *)malloc((size_t)hashp->BSIZE)) == NULL) {
 			free(bp);
 			return (NULL);
 		}
@@ -230,7 +224,7 @@ newbuf(HTAB *hashp, uint32 addr, BUFHEAD *prev_bp)
 		/* this memset is supposedly unnecessary but lets add
 		 * it anyways.
 		 */
-		memset(bp->page, 0xff, hashp->BSIZE);
+		memset(bp->page, 0xff, (size_t)hashp->BSIZE);
 
 		if (hashp->nbufs)
 			hashp->nbufs--;
@@ -349,7 +343,7 @@ extern void __buf_init(HTAB *hashp, int32 nbytes)
 
 	bfp = &(hashp->bufhead);
 	npages = (nbytes + hashp->BSIZE - 1) >> hashp->BSHIFT;
-	npages = MAX(npages, MIN_BUFFERS);
+	npages = PR_MAX(npages, MIN_BUFFERS);
 
 	hashp->nbufs = npages;
 	bfp->next = bfp;

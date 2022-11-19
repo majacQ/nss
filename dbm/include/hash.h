@@ -51,9 +51,9 @@ struct _bufhead {
 	BUFHEAD		*prev;		/* LRU links */
 	BUFHEAD		*next;		/* LRU links */
 	BUFHEAD		*ovfl;		/* Overflow page buffer header */
-	uint32	 addr;		/* Address of this page */
+	uint32	 	addr;		/* Address of this page */
 	char		*page;		/* Actual page data */
-	char        is_disk;
+	char     	is_disk;
 	char	 	flags;
 #define	BUF_MOD		0x0001
 #define BUF_DISK	0x0002
@@ -77,7 +77,7 @@ typedef int DBFILE_PTR;
 typedef struct hashhdr {		/* Disk resident portion */
 	int32		magic;		/* Magic NO for hash tables */
 	int32		version;	/* Version ID */
-	uint32	lorder;		/* Byte Order */
+	uint32		lorder;		/* Byte Order */
 	int32		bsize;		/* Bucket/Page Size */
 	int32		bshift;		/* Bucket shift */
 	int32		dsize;		/* Directory Size */
@@ -93,11 +93,11 @@ typedef struct hashhdr {		/* Disk resident portion */
 	int32		ffactor;	/* Fill factor */
 	int32		nkeys;		/* Number of keys in hash table */
 	int32		hdrpages;	/* Size of table header */
-	int32		h_charkey;	/* value of hash(CHARKEY) */
+	uint32		h_charkey;	/* value of hash(CHARKEY) */
 #define NCACHED	32			/* number of bit maps and spare 
 					 * points */
 	int32		spares[NCACHED];/* spare pages for overflow */
-	uint16	bitmaps[NCACHED];	/* address of overflow page 
+	uint16		bitmaps[NCACHED];	/* address of overflow page 
 						 * bitmaps */
 } HASHHDR;
 
@@ -123,12 +123,15 @@ typedef struct htab	 {		/* Memory resident data structure */
 	int		save_file;	/* Indicates whether we need to flush 
 					 * file at
 					 * exit */
-	uint32	*mapp[NCACHED];	/* Pointers to page maps */
+	uint32		*mapp[NCACHED];	/* Pointers to page maps */
 	int		nmaps;		/* Initial number of bitmaps */
 	int		nbufs;		/* Number of buffers left to 
 					 * allocate */
 	BUFHEAD 	bufhead;	/* Header of buffer lru list */
 	SEGMENT 	*dir;		/* Hash Bucket directory */
+	off_t		file_size;	/* in bytes */
+	char		is_temp;	/* unlink file on close */
+	char		updateEOF;	/* force EOF update on flush */
 } HTAB;
 
 /*
@@ -183,7 +186,7 @@ typedef struct htab	 {		/* Memory resident data structure */
 #define	OADDR_OF(S,O)	((uint32)((uint32)(S) << SPLITSHIFT) + (O))
 
 #define BUCKET_TO_PAGE(B) \
-	(B) + hashp->HDRPAGES + ((B) ? hashp->SPARES[__log2((B)+1)-1] : 0)
+	(B) + hashp->HDRPAGES + ((B) ? hashp->SPARES[__log2((uint32)((B)+1))-1] : 0)
 #define OADDR_TO_PAGE(B) 	\
 	BUCKET_TO_PAGE ( (1 << SPLITNUM((B))) -1 ) + OPAGENUM((B));
 
@@ -311,10 +314,10 @@ extern uint32 (*__default_hash) (const void *, size_t);
 void __buf_init(HTAB *hashp, int32 nbytes);
 int __big_delete(HTAB *hashp, BUFHEAD *bufp);
 BUFHEAD * __get_buf(HTAB *hashp, uint32 addr, BUFHEAD *prev_bp, int newpage);
-uint32 __call_hash(HTAB *hashp, char *k, int len);
+uint32 __call_hash(HTAB *hashp, char *k, size_t len);
 #include "page.h"
 extern int __big_split(HTAB *hashp, BUFHEAD *op,BUFHEAD *np,
-BUFHEAD *big_keyp,int addr,uint32   obucket, SPLIT_RETURN *ret);
+BUFHEAD *big_keyp,uint32 addr,uint32   obucket, SPLIT_RETURN *ret);
 void __free_ovflpage(HTAB *hashp, BUFHEAD *obufp);
 BUFHEAD * __add_ovflpage(HTAB *hashp, BUFHEAD *bufp);
 int __big_insert(HTAB *hashp, BUFHEAD *bufp, const DBT *key, const DBT *val);

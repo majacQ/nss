@@ -40,41 +40,45 @@ static char sccsid[] = "@(#)hash.c	8.9 (Berkeley) 6/16/94";
 
 #include "watcomfx.h"
 
-#if !defined(_WIN32) && !defined(_WINDOWS) && !defined(macintosh)
+#if !defined(_WIN32) && !defined(_WINDOWS) && !defined(macintosh) && !defined(XP_OS2_VACPP)
 #include <sys/param.h>
 #endif
 
 #if !defined(macintosh)
+#ifdef XP_OS2_EMX
+#include <sys/types.h>
+#endif
 #include <sys/stat.h>
 #endif
 
-#include <errno.h>
-#ifdef macintosh
+#if defined(macintosh)
 #include <unix.h>
-#else
-#include <fcntl.h>
+#include <unistd.h>
 #endif
+
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#if !defined(_WIN32) && !defined(_WINDOWS) && !defined(macintosh)
+#if !defined(_WIN32) && !defined(_WINDOWS) && !defined(macintosh) && !defined(XP_OS2_VACPP)
 #include <unistd.h>
 #endif
-
-#ifdef DEBUG
-#include <assert.h>
+#if defined(_WIN32) || defined(_WINDOWS) 
+#include <windows.h>
 #endif
+
+#ifdef XP_OS2_VACPP
+#include "types.h"
+#define EPERM SOCEPERM
+#endif
+
+#include <assert.h>
 
 #include "mcom_db.h"
 #include "hash.h"
 #include "page.h"
-
-#ifndef NSPR20
-#if defined(__sun)
-# include "sunos4.h"
-#endif /* __sun */
-#endif /* NSPR20 */
 
 /*
 #include "extern.h"
@@ -87,7 +91,7 @@ static int   hash_delete __P((const DB *, const DBT *, uint));
 static int   hash_fd __P((const DB *));
 static int   hash_get __P((const DB *, const DBT *, DBT *, uint));
 static int   hash_put __P((const DB *, DBT *, const DBT *, uint));
-static void *hash_realloc __P((SEGMENT **, int, int));
+static void *hash_realloc __P((SEGMENT **, size_t, size_t));
 static int   hash_seq __P((const DB *, DBT *, DBT *, uint));
 static int   hash_sync __P((const DB *, uint));
 static int   hdestroy __P((HTAB *));
@@ -114,25 +118,21 @@ int hash_accesses, hash_collisions, hash_expansions, hash_overflows;
 
 /* A new Lou (montulli@mozilla.com) routine.
  *
- * The database is screwed.  Delete it by 
- * making it a zero length file
+ * The database is screwed.  
  *
- * This zero's hashp so that the
- * database can't be accessed any more
+ * This closes the file, flushing buffers as appropriate.
  */
 static void
 __remove_database(DB *dbp)
 {
 	HTAB *hashp = (HTAB *)dbp->internal;
+
+	assert(0);
+
 	if (!hashp)
 		return;
-
-	if(hashp->fp != NO_FILE)
-		close(hashp->fp);
-	if(hashp->filename)
-		unlink(hashp->filename);
-	dbp->internal = NULL; /* zero the internal stuff */
-
+	hdestroy(hashp);
+	dbp->internal = NULL; 
 }
 
 /************************** INTERFACE ROUTINES ***************************/
@@ -186,10 +186,11 @@ __hash_open(const char *file, int flags, int mode, const HASHINFO *info, int dfl
 	 	 */
 		new_table = 1;
 	}
+	hashp->file_size = statbuf.st_size;
 
 	if (file) {				 
 
-#if defined(_WIN32) || defined(_WINDOWS) || defined (macintosh)
+#if defined(_WIN32) || defined(_WINDOWS) || defined (macintosh)  || defined(XP_OS2_VACPP)
 		if ((hashp->fp = DBFILE_OPEN(file, flags | O_BINARY, mode)) == -1)
 			RETURN_ERROR(errno, error0);
 #else
@@ -417,8 +418,12 @@ init_hash(HTAB *hashp, const char *file, HASHINFO *info)
 		if (stat(file, &statbuf))
 			return (NULL);
 
-#if !defined(_WIN32) && !defined(_WINDOWS) && !defined(macintosh)
+#if !defined(_WIN32) && !defined(_WINDOWS) && !defined(macintosh) && !defined(VMS) && !defined(XP_OS2)
+#if defined(__QNX__) && !defined(__QNXNTO__)
+		hashp->BSIZE = 512; /* preferred blk size on qnx4 */
+#else
 		hashp->BSIZE = statbuf.st_blksize;
+#endif
 
        	/* new code added by Lou to reduce block
        	 * size down below MAX_BSIZE
@@ -426,7 +431,7 @@ init_hash(HTAB *hashp, const char *file, HASHINFO *info)
        	if (hashp->BSIZE > MAX_BSIZE)
        		hashp->BSIZE = MAX_BSIZE;
 #endif
-		hashp->BSHIFT = __log2(hashp->BSIZE);
+		hashp->BSHIFT = __log2((uint32)hashp->BSIZE);
 	}
 
 	if (info) {
@@ -479,7 +484,7 @@ init_htab(HTAB *hashp, int nelem)
 	 */
 	nelem = (nelem - 1) / hashp->FFACTOR + 1;
 
-	l2 = __log2(MAX(nelem, 2));
+	l2 = __log2((uint32)PR_MAX(nelem, 2));
 	nbuckets = 1 << l2;
 
 	hashp->SPARES[l2] = l2 + 1;
@@ -488,16 +493,16 @@ init_htab(HTAB *hashp, int nelem)
 	hashp->LAST_FREED = 2;
 
 	/* First bitmap page is at: splitpoint l2 page offset 1 */
-	if (__ibitmap(hashp, OADDR_OF(l2, 1), l2 + 1, 0))
+	if (__ibitmap(hashp, (int)OADDR_OF(l2, 1), l2 + 1, 0))
 		return (-1);
 
 	hashp->MAX_BUCKET = hashp->LOW_MASK = nbuckets - 1;
 	hashp->HIGH_MASK = (nbuckets << 1) - 1;
-	hashp->HDRPAGES = ((MAX(sizeof(HASHHDR), MINHDRSIZE) - 1) >>
+	hashp->HDRPAGES = ((PR_MAX(sizeof(HASHHDR), MINHDRSIZE) - 1) >>
 	    hashp->BSHIFT) + 1;
 
 	nsegs = (nbuckets - 1) / hashp->SGSIZE + 1;
-	nsegs = 1 << __log2(nsegs);
+	nsegs = 1 << __log2((uint32)nsegs);
 
 	if (nsegs > hashp->DSIZE)
 		hashp->DSIZE = nsegs;
@@ -554,8 +559,13 @@ hdestroy(HTAB *hashp)
 	if (hashp->fp != -1)
 		(void)close(hashp->fp);
 
-	if(hashp->filename)
+	if(hashp->filename) {
+#if defined(_WIN32) || defined(_WINDOWS) || defined(XP_OS2)
+		if (hashp->is_temp)
+			(void)unlink(hashp->filename);
+#endif
 		free(hashp->filename);
+	}
 
 	free(hashp);
 
@@ -565,6 +575,65 @@ hdestroy(HTAB *hashp)
 	}
 	return (SUCCESS);
 }
+
+#if defined(_WIN32) || defined(_WINDOWS) 
+/*
+ * Close and reopen file to force file length update on windows. 
+ *
+ * Returns:
+ *	 0 == OK
+ *	-1 DBM_ERROR
+ */
+static int
+update_EOF(HTAB *hashp)
+{
+#if defined(DBM_REOPEN_ON_FLUSH)
+	char *      file       = hashp->filename;
+	off_t       file_size;
+	int         flags;
+	int         mode       = -1;
+	struct stat statbuf;
+
+	memset(&statbuf, 0, sizeof statbuf);
+
+	/* make sure we won't lose the file by closing it. */
+	if (!file || (stat(file, &statbuf)  && (errno == ENOENT)))  {
+		/* pretend we did it. */
+		return 0;
+	}
+
+	(void)close(hashp->fp);
+
+	flags = hashp->flags & ~(O_TRUNC | O_CREAT | O_EXCL);
+
+	if ((hashp->fp = DBFILE_OPEN(file, flags | O_BINARY, mode)) == -1)
+		return -1;
+	file_size = lseek(hashp->fp, (off_t)0, SEEK_END);
+	if (file_size == -1) 
+		return -1;
+	hashp->file_size = file_size;
+	return 0;
+#else
+	int    fd        = hashp->fp;
+	off_t  file_size = lseek(fd, (off_t)0, SEEK_END);
+	HANDLE handle    = (HANDLE)_get_osfhandle(fd);
+	BOOL   cool      = FlushFileBuffers(handle);
+#ifdef DEBUG3
+	if (!cool) {
+		DWORD err = GetLastError();
+		(void)fprintf(stderr,
+			"FlushFileBuffers failed, last error = %d, 0x%08x\n",
+			err, err);
+	}
+#endif
+	if (file_size == -1) 
+		return -1;
+	hashp->file_size = file_size;
+	return cool ? 0 : -1;
+#endif
+}
+#endif
+
 /*
  * Write modified pages to disk
  *
@@ -593,6 +662,14 @@ hash_sync(const DB *dbp, uint flags)
 		return (0);
 	if (__buf_free(hashp, 0, 1) || flush_meta(hashp))
 		return (DBM_ERROR);
+#if defined(_WIN32) || defined(_WINDOWS) 
+	if (hashp->updateEOF && hashp->filename && !hashp->is_temp) {
+		int status = update_EOF(hashp);
+		hashp->updateEOF = 0;
+		if (status)
+			return status;
+	}
+#endif
 	hashp->new_file = 0;
 	return (0);
 }
@@ -765,7 +842,8 @@ hash_access(
 	register BUFHEAD *rbufp;
 	BUFHEAD *bufp, *save_bufp;
 	register uint16 *bp;
-	register long n, ndx, off, size;
+	register long n, ndx, off;
+	register size_t size;
 	register char *kp;
 	uint16 pageno;
 	uint32 ovfl_loop_count=0;
@@ -790,7 +868,7 @@ hash_access(
 
 		if (bp[1] >= REAL_KEY) {
 			/* Real key/data pair */
-			if (size == off - *bp &&
+			if (size == (unsigned long)(off - *bp) &&
 			    memcmp(kp, rbufp->page + *bp, size) == 0)
 				goto found;
 			off = bp[1];
@@ -824,7 +902,7 @@ hash_access(
 			off = hashp->BSIZE;
 		                } else if (bp[1] < REAL_KEY) {
 			if ((ndx =
-			    __find_bigpair(hashp, rbufp, ndx, kp, size)) > 0)
+			    __find_bigpair(hashp, rbufp, ndx, kp, (int)size)) > 0)
 				goto found;
 			if (ndx == -2) {
 				bufp = rbufp;
@@ -934,7 +1012,7 @@ hash_seq(
 	for (bp = NULL; !bp || !bp[0]; ) {
 		if (!(bufp = hashp->cpage)) {
 			for (bucket = hashp->cbucket;
-			    bucket <= hashp->MAX_BUCKET;
+			    bucket <= (uint32)hashp->MAX_BUCKET;
 			    bucket++, hashp->cndx = 1) {
 				bufp = __get_buf(hashp, bucket, NULL, 0);
 				if (!bufp)
@@ -1000,7 +1078,8 @@ extern int
 __expand_table(HTAB *hashp)
 {
 	uint32 old_bucket, new_bucket;
-	int dirsize, new_segnum, spare_ndx;
+	int new_segnum, spare_ndx;
+	size_t dirsize;
 
 #ifdef HASH_STATISTICS
 	hash_expansions++;
@@ -1021,7 +1100,7 @@ __expand_table(HTAB *hashp)
 			hashp->DSIZE = dirsize << 1;
 		}
 		if ((hashp->dir[new_segnum] =
-		    (SEGMENT)calloc(hashp->SGSIZE, sizeof(SEGMENT))) == NULL)
+		    (SEGMENT)calloc((size_t)hashp->SGSIZE, sizeof(SEGMENT))) == NULL)
 			return (-1);
 		hashp->exsegs++;
 		hashp->nsegs++;
@@ -1031,13 +1110,13 @@ __expand_table(HTAB *hashp)
 	 * * increases), we need to copy the current contents of the spare
 	 * split bucket to the next bucket.
 	 */
-	spare_ndx = __log2(hashp->MAX_BUCKET + 1);
+	spare_ndx = __log2((uint32)(hashp->MAX_BUCKET + 1));
 	if (spare_ndx > hashp->OVFL_POINT) {
 		hashp->SPARES[spare_ndx] = hashp->SPARES[hashp->OVFL_POINT];
 		hashp->OVFL_POINT = spare_ndx;
 	}
 
-	if (new_bucket > hashp->HIGH_MASK) {
+	if (new_bucket > (uint32)hashp->HIGH_MASK) {
 		/* Starting a new doubling */
 		hashp->LOW_MASK = hashp->HIGH_MASK;
 		hashp->HIGH_MASK = new_bucket | hashp->LOW_MASK;
@@ -1053,7 +1132,7 @@ __expand_table(HTAB *hashp)
 static void *
 hash_realloc(
 	SEGMENT **p_ptr,
-	int oldsize, int newsize)
+	size_t oldsize, size_t newsize)
 {
 	register void *p;
 
@@ -1067,13 +1146,13 @@ hash_realloc(
 }
 
 extern uint32
-__call_hash(HTAB *hashp, char *k, int len)
+__call_hash(HTAB *hashp, char *k, size_t len)
 {
 	uint32 n, bucket;
 
 	n = hashp->hash(k, len);
 	bucket = n & hashp->HIGH_MASK;
-	if (bucket > hashp->MAX_BUCKET)
+	if (bucket > (uint32)hashp->MAX_BUCKET)
 		bucket = bucket & hashp->LOW_MASK;
 	return (bucket);
 }
@@ -1094,7 +1173,7 @@ alloc_segs(
 	int save_errno;
 
 	if ((hashp->dir =
-	    (SEGMENT *)calloc(hashp->DSIZE, sizeof(SEGMENT *))) == NULL) {
+	    (SEGMENT *)calloc((size_t)hashp->DSIZE, sizeof(SEGMENT *))) == NULL) {
 		save_errno = errno;
 		(void)hdestroy(hashp);
 		errno = save_errno;
@@ -1102,7 +1181,7 @@ alloc_segs(
 	}
 	/* Allocate segments */
 	if ((store =
-	    (SEGMENT)calloc(nsegs << hashp->SSHIFT, sizeof(SEGMENT))) == NULL) {
+	    (SEGMENT)calloc((size_t)nsegs << hashp->SSHIFT, sizeof(SEGMENT))) == NULL) {
 		save_errno = errno;
 		(void)hdestroy(hashp);
 		errno = save_errno;

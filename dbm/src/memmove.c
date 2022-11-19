@@ -1,4 +1,4 @@
-#if defined(__sun) && !defined(__svr4__)
+#if defined(__sun) && !defined(__SVR4)
 /*-
  * Copyright (c) 1990, 1993
  *	The Regents of the University of California.  All rights reserved.
@@ -41,7 +41,7 @@ static char sccsid[] = "@(#)bcopy.c	8.1 (Berkeley) 6/4/93";
 
 #include "watcomfx.h"
 
-#ifndef _WINDOWS
+#ifdef HAVE_SYS_CDEFS_H
 #include <sys/cdefs.h>
 #else
 #include "cdefs.h"
@@ -145,3 +145,6 @@ done:
 #endif
 }
 #endif /* no __sgi */
+
+/* Some compilers don't like an empty source file. */
+static int dummy = 0;
