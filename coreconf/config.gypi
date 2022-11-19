@@ -99,6 +99,7 @@
     'disable_arm_hw_aes%': 0,
     'disable_arm_hw_sha1%': 0,
     'disable_arm_hw_sha2%': 0,
+    'disable_intel_hw_sha%': 0,
     'disable_tests%': 0,
     'disable_chachapoly%': 0,
     'disable_deprecated_seed%': 0,
@@ -135,6 +136,8 @@
     'coverage%': 0,
     'softfp_cflags%': '',
     'enable_draft_hpke%': 0,
+    'force_integrated_as%': 0,
+    'disable_ckbi%': 0,
   },
   'target_defaults': {
     # Settings specific to targets should go here.
@@ -209,7 +212,7 @@
           },
         },
       }],
-      [ 'target_arch=="arm64" or target_arch=="aarch64" or target_arch=="sparc64" or target_arch=="ppc64" or target_arch=="ppc64le" or target_arch=="s390x" or target_arch=="mips64" or target_arch=="e2k"', {
+      [ 'target_arch=="arm64" or target_arch=="aarch64" or target_arch=="sparc64" or target_arch=="ppc64" or target_arch=="ppc64le" or target_arch=="s390x" or target_arch=="mips64" or target_arch=="e2k" or target_arch=="riscv64"', {
         'defines': [
           'NSS_USE_64',
         ],
@@ -369,7 +372,7 @@
               '_DEFAULT_SOURCE', # for <endian.h> functions, strdup, realpath, and getentropy
               '_BSD_SOURCE', # for the above in glibc <= 2.19
               '_POSIX_SOURCE', # for <signal.h>
-              'SQL_MEASURE_USE_TEMP_DIR', # use tmpdir for the access calls
+              'SDB_MEASURE_USE_TEMP_DIR', # use tmpdir for the access calls
             ],
           }],
           [ 'OS=="dragonfly" or OS=="freebsd"', {

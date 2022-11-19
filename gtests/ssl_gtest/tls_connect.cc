@@ -195,6 +195,13 @@ void TlsConnectTestBase::SaveAlgorithmPolicy() {
     ASSERT_EQ(SECSuccess, rv);
     saved_policies_.push_back(std::make_tuple(*it, policy));
   }
+  saved_options_.clear();
+  for (auto it : options_) {
+    int32_t option;
+    SECStatus rv = NSS_OptionGet(it, &option);
+    ASSERT_EQ(SECSuccess, rv);
+    saved_options_.push_back(std::make_tuple(it, option));
+  }
 }
 
 void TlsConnectTestBase::RestoreAlgorithmPolicy() {
@@ -203,6 +210,12 @@ void TlsConnectTestBase::RestoreAlgorithmPolicy() {
     auto policy = std::get<1>(*it);
     SECStatus rv = NSS_SetAlgorithmPolicy(
         algorithm, policy, NSS_USE_POLICY_IN_SSL | NSS_USE_ALG_IN_SSL_KX);
+    ASSERT_EQ(SECSuccess, rv);
+  }
+  for (auto it = saved_options_.begin(); it != saved_options_.end(); ++it) {
+    auto option_id = std::get<0>(*it);
+    auto option = std::get<1>(*it);
+    SECStatus rv = NSS_OptionSet(option_id, option);
     ASSERT_EQ(SECSuccess, rv);
   }
 }
@@ -248,17 +261,19 @@ void TlsConnectTestBase::ResetAntiReplay(PRTime window) {
   anti_replay_.reset(p_anti_replay);
 }
 
-void TlsConnectTestBase::MakeEcKeyParams(SECItem* params, SSLNamedGroup group) {
+ScopedSECItem TlsConnectTestBase::MakeEcKeyParams(SSLNamedGroup group) {
   auto groupDef = ssl_LookupNamedGroup(group);
-  ASSERT_NE(nullptr, groupDef);
+  EXPECT_NE(nullptr, groupDef);
 
   auto oidData = SECOID_FindOIDByTag(groupDef->oidTag);
-  ASSERT_NE(nullptr, oidData);
-  ASSERT_NE(nullptr,
-            SECITEM_AllocItem(nullptr, params, (2 + oidData->oid.len)));
+  EXPECT_NE(nullptr, oidData);
+  ScopedSECItem params(
+      SECITEM_AllocItem(nullptr, nullptr, (2 + oidData->oid.len)));
+  EXPECT_TRUE(!!params);
   params->data[0] = SEC_ASN1_OBJECT_ID;
   params->data[1] = oidData->oid.len;
   memcpy(params->data + 2, oidData->oid.data, oidData->oid.len);
+  return params;
 }
 
 void TlsConnectTestBase::GenerateEchConfig(
@@ -266,20 +281,18 @@ void TlsConnectTestBase::GenerateEchConfig(
     const std::string& public_name, uint16_t max_name_len, DataBuffer& record,
     ScopedSECKEYPublicKey& pubKey, ScopedSECKEYPrivateKey& privKey) {
   bool gen_keys = !pubKey && !privKey;
-  SECKEYECParams ecParams = {siBuffer, NULL, 0};
-  MakeEcKeyParams(&ecParams, ssl_grp_ec_curve25519);
 
   SECKEYPublicKey* pub = nullptr;
   SECKEYPrivateKey* priv = nullptr;
 
   if (gen_keys) {
-    priv = SECKEY_CreateECPrivateKey(&ecParams, &pub, nullptr);
+    ScopedSECItem ecParams = MakeEcKeyParams(ssl_grp_ec_curve25519);
+    priv = SECKEY_CreateECPrivateKey(ecParams.get(), &pub, nullptr);
   } else {
     priv = privKey.get();
     pub = pubKey.get();
   }
   ASSERT_NE(nullptr, priv);
-  SECITEM_FreeItem(&ecParams, PR_FALSE);
   PRUint8 encoded[1024];
   unsigned int encoded_len = 0;
   SECStatus rv = SSL_EncodeEchConfigId(
@@ -300,7 +313,7 @@ void TlsConnectTestBase::SetupEch(std::shared_ptr<TlsAgent>& client,
                                   std::shared_ptr<TlsAgent>& server,
                                   HpkeKemId kem_id, bool expect_ech,
                                   bool set_client_config,
-                                  bool set_server_config) {
+                                  bool set_server_config, int max_name_len) {
   EXPECT_TRUE(set_server_config || set_client_config);
   ScopedSECKEYPublicKey pub;
   ScopedSECKEYPrivateKey priv;
@@ -309,8 +322,8 @@ void TlsConnectTestBase::SetupEch(std::shared_ptr<TlsAgent>& client,
       {HpkeKdfHkdfSha256, HpkeAeadChaCha20Poly1305},
       {HpkeKdfHkdfSha256, HpkeAeadAes128Gcm}};
 
-  GenerateEchConfig(kem_id, kDefaultSuites, "public.name", 100, record, pub,
-                    priv);
+  GenerateEchConfig(kem_id, kDefaultSuites, "public.name", max_name_len, record,
+                    pub, priv);
   ASSERT_NE(0U, record.len());
   SECStatus rv;
   if (set_server_config) {
@@ -379,10 +392,10 @@ void TlsConnectTestBase::ExpectResumption(SessionResumptionMode expected,
 }
 
 void TlsConnectTestBase::EnsureTlsSetup() {
-  EXPECT_TRUE(server_->EnsureTlsSetup(server_model_ ? server_model_->ssl_fd()
-                                                    : nullptr));
-  EXPECT_TRUE(client_->EnsureTlsSetup(client_model_ ? client_model_->ssl_fd()
-                                                    : nullptr));
+  EXPECT_TRUE(server_->EnsureTlsSetup(
+      server_model_ ? server_model_->ssl_fd().get() : nullptr));
+  EXPECT_TRUE(client_->EnsureTlsSetup(
+      client_model_ ? client_model_->ssl_fd().get() : nullptr));
   server_->SetAntiReplayContext(anti_replay_);
   EXPECT_EQ(SECSuccess, SSL_SetTimeFunc(client_->ssl_fd(),
                                         TlsConnectTestBase::TimeFunc, &now_));
@@ -459,10 +472,8 @@ void TlsConnectTestBase::CheckConnected() {
   EXPECT_EQ(TlsAgent::STATE_CONNECTED, server_->state());
 
   uint16_t cipher_suite1, cipher_suite2;
-  bool ret = client_->cipher_suite(&cipher_suite1);
-  EXPECT_TRUE(ret);
-  ret = server_->cipher_suite(&cipher_suite2);
-  EXPECT_TRUE(ret);
+  ASSERT_TRUE(client_->cipher_suite(&cipher_suite1));
+  ASSERT_TRUE(server_->cipher_suite(&cipher_suite2));
   EXPECT_EQ(cipher_suite1, cipher_suite2);
 
   std::cerr << "Connected with version " << client_->version()
@@ -889,8 +900,8 @@ void TlsConnectTestBase::CheckEarlyDataAccepted() {
   server_->CheckEarlyDataAccepted(expect_early_data_accepted_);
 }
 
-void TlsConnectTestBase::DisableECDHEServerKeyReuse() {
-  server_->DisableECDHEServerKeyReuse();
+void TlsConnectTestBase::EnableECDHEServerKeyReuse() {
+  server_->EnableECDHEServerKeyReuse();
 }
 
 void TlsConnectTestBase::SkipVersionChecks() {
