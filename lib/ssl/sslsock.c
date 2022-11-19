@@ -79,7 +79,7 @@ static sslOptions ssl_defaults = {
     .enableOCSPStapling = PR_FALSE,
     .enableDelegatedCredentials = PR_FALSE,
     .enableALPN = PR_TRUE,
-    .reuseServerECDHEKey = PR_TRUE,
+    .reuseServerECDHEKey = PR_FALSE,
     .enableFallbackSCSV = PR_FALSE,
     .enableServerDhe = PR_TRUE,
     .enableExtendedMS = PR_TRUE,
@@ -89,24 +89,25 @@ static sslOptions ssl_defaults = {
     .enableTls13CompatMode = PR_FALSE,
     .enableDtls13VersionCompat = PR_FALSE,
     .enableDtlsShortHeader = PR_FALSE,
-    .enableHelloDowngradeCheck = PR_FALSE,
+    .enableHelloDowngradeCheck = PR_TRUE,
     .enableV2CompatibleHello = PR_FALSE,
     .enablePostHandshakeAuth = PR_FALSE,
     .suppressEndOfEarlyData = PR_FALSE,
     .enableTls13GreaseEch = PR_FALSE,
-    .enableTls13BackendEch = PR_FALSE
+    .enableTls13BackendEch = PR_FALSE,
+    .callExtensionWriterOnEchInner = PR_FALSE,
 };
 
 /*
  * default range of enabled SSL/TLS protocols
  */
 static SSLVersionRange versions_defaults_stream = {
-    SSL_LIBRARY_VERSION_TLS_1_0,
+    SSL_LIBRARY_VERSION_TLS_1_2,
     SSL_LIBRARY_VERSION_TLS_1_3
 };
 
 static SSLVersionRange versions_defaults_datagram = {
-    SSL_LIBRARY_VERSION_TLS_1_1,
+    SSL_LIBRARY_VERSION_TLS_1_2,
     SSL_LIBRARY_VERSION_TLS_1_2
 };
 
@@ -1716,7 +1717,7 @@ NSS_SetDomesticPolicy(void)
     /* If we've already defined some policy oids, skip changing them */
     rv = NSS_GetAlgorithmPolicy(SEC_OID_APPLY_SSL_POLICY, &policy);
     if ((rv == SECSuccess) && (policy & NSS_USE_POLICY_IN_SSL)) {
-        return ssl_Init(); /* make sure the policies have bee loaded */
+        return ssl_Init(); /* make sure the policies have been loaded */
     }
 
     for (cipher = SSL_ImplementedCiphers; *cipher != 0; ++cipher) {
@@ -2096,23 +2097,35 @@ ssl_SelectDHEGroup(sslSocket *ss, const sslNamedGroupDef **groupDef)
         ssl_grp_ffdhe_custom, WEAK_DHE_SIZE, ssl_kea_dh,
         SEC_OID_TLS_DHE_CUSTOM, PR_TRUE
     };
+    PRInt32 minDH;
+    SECStatus rv;
+
+    // make sure we select a group consistent with our
+    // current policy policy
+    rv = NSS_OptionGet(NSS_DH_MIN_KEY_SIZE, &minDH);
+    if (rv != SECSuccess || minDH <= 0) {
+        minDH = DH_MIN_P_BITS;
+    }
 
     /* Only select weak groups in TLS 1.2 and earlier, but not if the client has
      * indicated that it supports an FFDHE named group. */
     if (ss->ssl3.dheWeakGroupEnabled &&
         ss->version < SSL_LIBRARY_VERSION_TLS_1_3 &&
-        !ss->xtnData.peerSupportsFfdheGroups) {
+        !ss->xtnData.peerSupportsFfdheGroups &&
+        weak_group_def.bits >= minDH) {
         *groupDef = &weak_group_def;
         return SECSuccess;
     }
     if (ss->ssl3.dhePreferredGroup &&
-        ssl_NamedGroupEnabled(ss, ss->ssl3.dhePreferredGroup)) {
+        ssl_NamedGroupEnabled(ss, ss->ssl3.dhePreferredGroup) &&
+        ss->ssl3.dhePreferredGroup->bits >= minDH) {
         *groupDef = ss->ssl3.dhePreferredGroup;
         return SECSuccess;
     }
     for (i = 0; i < SSL_NAMED_GROUP_COUNT; ++i) {
         if (ss->namedGroupPreferences[i] &&
-            ss->namedGroupPreferences[i]->keaType == ssl_kea_dh) {
+            ss->namedGroupPreferences[i]->keaType == ssl_kea_dh &&
+            ss->namedGroupPreferences[i]->bits >= minDH) {
             *groupDef = ss->namedGroupPreferences[i];
             return SECSuccess;
         }
@@ -2212,12 +2225,18 @@ ssl_NextProtoNegoCallback(void *arg, PRFileDesc *fd,
 {
     unsigned int i, j;
     sslSocket *ss = ssl_FindSocket(fd);
-
     if (!ss) {
         SSL_DBG(("%d: SSL[%d]: bad socket in ssl_NextProtoNegoCallback",
                  SSL_GETPID(), fd));
         return SECFailure;
     }
+    if (ss->opt.nextProtoNego.len == 0) {
+        SSL_DBG(("%d: SSL[%d]: ssl_NextProtoNegoCallback ALPN disabled",
+                 SSL_GETPID(), fd));
+        SSL3_SendAlert(ss, alert_fatal, unsupported_extension);
+        return SECFailure;
+    }
+
     PORT_Assert(protoMaxLen <= 255);
     if (protoMaxLen > 255) {
         PORT_SetError(SEC_ERROR_OUTPUT_LEN);
@@ -2257,7 +2276,7 @@ SSL_SetNextProtoNego(PRFileDesc *fd, const unsigned char *data,
         return SECFailure;
     }
 
-    if (ssl3_ValidateAppProtocol(data, length) != SECSuccess) {
+    if (length > 0 && ssl3_ValidateAppProtocol(data, length) != SECSuccess) {
         return SECFailure;
     }
 
@@ -2266,11 +2285,13 @@ SSL_SetNextProtoNego(PRFileDesc *fd, const unsigned char *data,
      * first protocol to the end of the list. */
     ssl_GetSSL3HandshakeLock(ss);
     SECITEM_FreeItem(&ss->opt.nextProtoNego, PR_FALSE);
-    SECITEM_AllocItem(NULL, &ss->opt.nextProtoNego, length);
-    size_t firstLen = data[0] + 1;
-    /* firstLen <= length is ensured by ssl3_ValidateAppProtocol. */
-    PORT_Memcpy(ss->opt.nextProtoNego.data + (length - firstLen), data, firstLen);
-    PORT_Memcpy(ss->opt.nextProtoNego.data, data + firstLen, length - firstLen);
+    if (length > 0) {
+        SECITEM_AllocItem(NULL, &ss->opt.nextProtoNego, length);
+        size_t firstLen = data[0] + 1;
+        /* firstLen <= length is ensured by ssl3_ValidateAppProtocol. */
+        PORT_Memcpy(ss->opt.nextProtoNego.data + (length - firstLen), data, firstLen);
+        PORT_Memcpy(ss->opt.nextProtoNego.data, data + firstLen, length - firstLen);
+    }
     ssl_ReleaseSSL3HandshakeLock(ss);
 
     return SSL_SetNextProtoCallback(fd, ssl_NextProtoNegoCallback, NULL);
@@ -2543,6 +2564,7 @@ SSL_ReconfigFD(PRFileDesc *model, PRFileDesc *fd)
         ss->handshakeCallbackData = sm->handshakeCallbackData;
     if (sm->pkcs11PinArg)
         ss->pkcs11PinArg = sm->pkcs11PinArg;
+
     return fd;
 }
 
@@ -3868,7 +3890,7 @@ loser:
     return SECFailure;
 }
 
-#if defined(XP_UNIX) || defined(XP_WIN32) || defined(XP_BEOS)
+#if defined(XP_UNIX) || defined(XP_WIN32)
 #define NSS_HAVE_GETENV 1
 #endif
 
@@ -4284,6 +4306,7 @@ struct {
     EXP(AddExternalPsk0Rtt),
     EXP(AeadDecrypt),
     EXP(AeadEncrypt),
+    EXP(CallExtensionWriterOnEchInner),
     EXP(CipherSuiteOrderGet),
     EXP(CipherSuiteOrderSet),
     EXP(CreateAntiReplayContext),
@@ -4296,6 +4319,7 @@ struct {
     EXP(DestroyResumptionTokenInfo),
     EXP(EnableTls13BackendEch),
     EXP(EnableTls13GreaseEch),
+    EXP(SetTls13GreaseEchSize),
     EXP(EncodeEchConfigId),
     EXP(GetCurrentEpoch),
     EXP(GetEchRetryConfigs),
@@ -4374,6 +4398,24 @@ SSLExp_EnableTls13GreaseEch(PRFileDesc *fd, PRBool enabled)
 }
 
 SECStatus
+SSLExp_SetTls13GreaseEchSize(PRFileDesc *fd, PRUint8 size)
+{
+    sslSocket *ss = ssl_FindSocket(fd);
+    if (!ss || size == 0) {
+        return SECFailure;
+    }
+    ssl_Get1stHandshakeLock(ss);
+    ssl_GetSSL3HandshakeLock(ss);
+
+    ss->ssl3.hs.greaseEchSize = size;
+
+    ssl_ReleaseSSL3HandshakeLock(ss);
+    ssl_Release1stHandshakeLock(ss);
+
+    return SECSuccess;
+}
+
+SECStatus
 SSLExp_EnableTls13BackendEch(PRFileDesc *fd, PRBool enabled)
 {
     sslSocket *ss = ssl_FindSocket(fd);
@@ -4381,6 +4423,17 @@ SSLExp_EnableTls13BackendEch(PRFileDesc *fd, PRBool enabled)
         return SECFailure;
     }
     ss->opt.enableTls13BackendEch = enabled;
+    return SECSuccess;
+}
+
+SECStatus
+SSLExp_CallExtensionWriterOnEchInner(PRFileDesc *fd, PRBool enabled)
+{
+    sslSocket *ss = ssl_FindSocket(fd);
+    if (!ss) {
+        return SECFailure;
+    }
+    ss->opt.callExtensionWriterOnEchInner = enabled;
     return SECSuccess;
 }
 
