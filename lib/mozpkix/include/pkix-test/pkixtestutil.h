@@ -40,7 +40,7 @@ class ByteString : public std::string {
  public:
   ByteString() {}
   ByteString(size_t count, uint8_t value) : std::string(count, char(value)) {}
-  ByteString(const uint8_t* data)
+  explicit ByteString(const uint8_t* data)
       : std::string(reinterpret_cast<const char*>(data)) {}
   ByteString(const uint8_t* data, size_t length)
       : std::string(reinterpret_cast<const char*>(data), length) {}
@@ -59,9 +59,7 @@ class ByteString : public std::string {
   void append(const uint8_t* data, size_t length) {
     std::string::append(reinterpret_cast<const char*>(data), length);
   }
-  void push_back(uint8_t c) {
-    std::string::push_back(char(c));
-  }
+  void push_back(uint8_t c) { std::string::push_back(char(c)); }
 };
 
 inline bool ENCODING_FAILED(const ByteString& bs) { return bs.empty(); }
@@ -411,6 +409,8 @@ class OCSPResponseContext final {
   OCSPResponseExtension* singleExtensions;
   // ResponseData extensions.
   OCSPResponseExtension* responseExtensions;
+  const ByteString* trailingResponseData;  // optional; trailing data to include
+                                           // at the end of the ResponseData.
   bool includeEmptyExtensions;  // If true, include the extension wrapper
                                 // regardless of if there are any actual
                                 // extensions.
