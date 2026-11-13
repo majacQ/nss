@@ -72,11 +72,12 @@ static void CheckAcks(const std::shared_ptr<TlsRecordRecorder>& acks,
   const DataBuffer& buf = acks->record(index).buffer;
   size_t offset = 2;
   uint64_t len;
-
-  EXPECT_EQ(2 + expected.size() * 8, buf.len());
+  // RFC 9147 -  7. ACK Message.
+  // 16 bytes correspond to the length of the epoch and the length of the seqNum
+  EXPECT_EQ(2 + expected.size() * 16, buf.len());
   ASSERT_TRUE(buf.Read(0, 2, &len));
   ASSERT_EQ(static_cast<size_t>(len + 2), buf.len());
-  if ((2 + expected.size() * 8) != buf.len()) {
+  if ((2 + expected.size() * 16) != buf.len()) {
     while (offset < buf.len()) {
       uint64_t ack;
       ASSERT_TRUE(buf.Read(offset, 8, &ack));
@@ -88,9 +89,13 @@ static void CheckAcks(const std::shared_ptr<TlsRecordRecorder>& acks,
 
   for (size_t i = 0; i < expected.size(); ++i) {
     uint64_t a = expected[i];
-    uint64_t ack;
-    ASSERT_TRUE(buf.Read(offset, 8, &ack));
+    uint64_t ackEpoch;
+    uint64_t ackSeq;
+    ASSERT_TRUE(buf.Read(offset, 8, &ackEpoch));
     offset += 8;
+    ASSERT_TRUE(buf.Read(offset, 8, &ackSeq));
+    offset += 8;
+    uint64_t ack = (ackEpoch << 48) | ackSeq;
     if (a != ack) {
       ADD_FAILURE() << "Wrong ack " << i << " expected=0x" << std::hex << a
                     << " got=0x" << ack << std::dec;
@@ -196,6 +201,8 @@ class TlsDropDatagram13 : public TlsConnectDatagram13,
 // ACKs
 TEST_P(TlsDropDatagram13, DropClientFirstFlightOnce) {
   client_filters_.drop_->Reset({0});
+  // filters only work with particular groups
+  client_->ConfigNamedGroups(kNonPQDHEGroups);
   StartConnect();
   client_->Handshake();
   server_->Handshake();
@@ -205,6 +212,9 @@ TEST_P(TlsDropDatagram13, DropClientFirstFlightOnce) {
 
 TEST_P(TlsDropDatagram13, DropServerFirstFlightOnce) {
   server_filters_.drop_->Reset(0xff);
+  // filters only work with particular groups
+  server_->ConfigNamedGroups(kNonPQDHEGroups);
+  client_->ConfigNamedGroups(kNonPQDHEGroups);
   StartConnect();
   client_->Handshake();
   // Send the first flight, all dropped.
@@ -219,6 +229,9 @@ TEST_P(TlsDropDatagram13, DropServerFirstFlightOnce) {
 // TODO(ekr@rtfm.com): We should generate an empty ACK.
 TEST_P(TlsDropDatagram13, DropServerFirstRecordOnce) {
   server_filters_.drop_->Reset({0});
+  // filters only work with particular groups
+  server_->ConfigNamedGroups(kNonPQDHEGroups);
+  client_->ConfigNamedGroups(kNonPQDHEGroups);
   StartConnect();
   client_->Handshake();
   server_->Handshake();
@@ -231,6 +244,8 @@ TEST_P(TlsDropDatagram13, DropServerFirstRecordOnce) {
 // produce an ACK.
 TEST_P(TlsDropDatagram13, DropServerSecondRecordOnce) {
   server_filters_.drop_->Reset({1});
+  // filters only work with particular groups
+  server_->ConfigNamedGroups(kNonPQDHEGroups);
   StartConnect();
   client_->Handshake();
   server_->Handshake();
@@ -294,6 +309,9 @@ TEST_P(TlsDropDatagram13, DropClientCertVerify) {
 // Shrink the MTU down so that certs get split and drop the first piece.
 TEST_P(TlsDropDatagram13, DropFirstHalfOfServerCertificate) {
   server_filters_.drop_->Reset({2});
+  // filters only work with particular groups
+  server_->ConfigNamedGroups(kNonPQDHEGroups);
+  client_->ConfigNamedGroups(kNonPQDHEGroups);
   StartConnect();
   ShrinkPostServerHelloMtu();
   client_->Handshake();
@@ -321,6 +339,9 @@ TEST_P(TlsDropDatagram13, DropFirstHalfOfServerCertificate) {
 // Shrink the MTU down so that certs get split and drop the second piece.
 TEST_P(TlsDropDatagram13, DropSecondHalfOfServerCertificate) {
   server_filters_.drop_->Reset({3});
+  // filters only work with particular groups
+  server_->ConfigNamedGroups(kNonPQDHEGroups);
+  client_->ConfigNamedGroups(kNonPQDHEGroups);
   StartConnect();
   ShrinkPostServerHelloMtu();
   client_->Handshake();
@@ -409,6 +430,9 @@ class TlsFragmentationAndRecoveryTest : public TlsDropDatagram13 {
 
  private:
   void FirstFlightDropCertificate() {
+    // filters only work with particular groups
+    server_->ConfigNamedGroups(kNonPQDHEGroups);
+    client_->ConfigNamedGroups(kNonPQDHEGroups);
     StartConnect();
     client_->Handshake();
 
@@ -549,13 +573,14 @@ TEST_P(TlsDropDatagram13, NoDropsDuringZeroRtt) {
   CheckConnected();
   SendReceive();
   EXPECT_EQ(0U, client_filters_.ack_->count());
-  CheckAcks(server_filters_.ack_, 0,
-            {0x0001000000000001ULL,    // EOED
-             0x0002000000000000ULL});  // Finished
+  CheckAcks(server_filters_.ack_, 0, {0x0002000000000000ULL});  // Finished
 }
 
 TEST_P(TlsDropDatagram13, DropEEDuringZeroRtt) {
   SetupForZeroRtt();
+  // filters only work with particular groups
+  server_->ConfigNamedGroups(kNonPQDHEGroups);
+  client_->ConfigNamedGroups(kNonPQDHEGroups);
   SetFilters();
   std::cerr << "Starting second handshake" << std::endl;
   client_->Set0RttEnabled(true);
@@ -569,9 +594,7 @@ TEST_P(TlsDropDatagram13, DropEEDuringZeroRtt) {
   CheckConnected();
   SendReceive();
   CheckAcks(client_filters_.ack_, 0, {0});
-  CheckAcks(server_filters_.ack_, 0,
-            {0x0001000000000002ULL,    // EOED
-             0x0002000000000000ULL});  // Finished
+  CheckAcks(server_filters_.ack_, 0, {0x0002000000000000ULL});  // Finished
 }
 
 class TlsReorderDatagram13 : public TlsDropDatagram13 {
@@ -601,6 +624,9 @@ class TlsReorderDatagram13 : public TlsDropDatagram13 {
 // of the flight and will still produce an ACK.
 TEST_P(TlsDropDatagram13, ReorderServerEE) {
   server_filters_.drop_->Reset({1});
+  // filters only work with particular groups
+  server_->ConfigNamedGroups(kNonPQDHEGroups);
+  client_->ConfigNamedGroups(kNonPQDHEGroups);
   StartConnect();
   client_->Handshake();
   server_->Handshake();
@@ -679,6 +705,9 @@ TEST_F(TlsConnectDatagram13, SendOutOfOrderHsNonsenseWithHandshakeKey) {
 // Shrink the MTU down so that certs get split and then swap the first and
 // second pieces of the server certificate.
 TEST_P(TlsReorderDatagram13, ReorderServerCertificate) {
+  // filters only work with particular groups
+  server_->ConfigNamedGroups(kNonPQDHEGroups);
+  client_->ConfigNamedGroups(kNonPQDHEGroups);
   StartConnect();
   ShrinkPostServerHelloMtu();
   client_->Handshake();
@@ -698,46 +727,6 @@ TEST_P(TlsReorderDatagram13, ReorderServerCertificate) {
   CheckedHandshakeSendReceive();
   EXPECT_EQ(2UL, server_filters_.records_->count());  // ACK + Data
   CheckAcks(server_filters_.ack_, 0, {0x0002000000000000ULL});
-}
-
-TEST_P(TlsReorderDatagram13, DataAfterEOEDDuringZeroRtt) {
-  SetupForZeroRtt();
-  SetFilters();
-  std::cerr << "Starting second handshake" << std::endl;
-  client_->Set0RttEnabled(true);
-  server_->Set0RttEnabled(true);
-  ExpectResumption(RESUME_TICKET);
-  // Send the client's first flight of zero RTT data.
-  ZeroRttSendReceive(true, true);
-  // Now send another client application data record but
-  // capture it.
-  client_filters_.records_->Clear();
-  client_filters_.drop_->Reset(0xff);
-  const char* k0RttData = "123456";
-  const PRInt32 k0RttDataLen = static_cast<PRInt32>(strlen(k0RttData));
-  PRInt32 rv =
-      PR_Write(client_->ssl_fd(), k0RttData, k0RttDataLen);  // 0-RTT write.
-  EXPECT_EQ(k0RttDataLen, rv);
-  EXPECT_EQ(1UL, client_filters_.records_->count());  // data
-  server_->Handshake();
-  client_->Handshake();
-  ExpectEarlyDataAccepted(true);
-  // The server still hasn't received anything at this point.
-  EXPECT_EQ(3UL, client_filters_.records_->count());  // data, EOED, FIN
-  EXPECT_EQ(TlsAgent::STATE_CONNECTED, client_->state());
-  EXPECT_EQ(TlsAgent::STATE_CONNECTING, server_->state());
-  // Now re-send the client's messages: EOED, data, FIN
-  ReSend(TlsAgent::CLIENT, std::vector<size_t>({1, 0, 2}));
-  server_->Handshake();
-  CheckConnected();
-  EXPECT_EQ(0U, client_filters_.ack_->count());
-  // Acknowledgements for EOED and Finished.
-  CheckAcks(server_filters_.ack_, 0,
-            {0x0001000000000002ULL, 0x0002000000000000ULL});
-  uint8_t buf[8];
-  rv = PR_Read(server_->ssl_fd(), buf, sizeof(buf));
-  EXPECT_EQ(-1, rv);
-  EXPECT_EQ(PR_WOULD_BLOCK_ERROR, PORT_GetError());
 }
 
 TEST_P(TlsReorderDatagram13, DataAfterFinDuringZeroRtt) {
@@ -763,17 +752,16 @@ TEST_P(TlsReorderDatagram13, DataAfterFinDuringZeroRtt) {
   client_->Handshake();
   ExpectEarlyDataAccepted(true);
   // The server still hasn't received anything at this point.
-  EXPECT_EQ(3UL, client_filters_.records_->count());  // EOED, FIN, Data
+  EXPECT_EQ(2UL, client_filters_.records_->count());  // Data, FIN
   EXPECT_EQ(TlsAgent::STATE_CONNECTED, client_->state());
   EXPECT_EQ(TlsAgent::STATE_CONNECTING, server_->state());
-  // Now re-send the client's messages: EOED, FIN, Data
-  ReSend(TlsAgent::CLIENT, std::vector<size_t>({1, 2, 0}));
+  // Now re-send the client's messages: FIN, Data
+  ReSend(TlsAgent::CLIENT, std::vector<size_t>({1, 0}));
   server_->Handshake();
   CheckConnected();
   EXPECT_EQ(0U, client_filters_.ack_->count());
-  // Acknowledgements for EOED and Finished.
-  CheckAcks(server_filters_.ack_, 0,
-            {0x0001000000000002ULL, 0x0002000000000000ULL});
+  // Acknowledgement for Finished.
+  CheckAcks(server_filters_.ack_, 0, {0x0002000000000000ULL});
   uint8_t buf[8];
   rv = PR_Read(server_->ssl_fd(), buf, sizeof(buf));
   EXPECT_EQ(-1, rv);
@@ -910,5 +898,43 @@ INSTANTIATE_TEST_SUITE_P(DatagramReorder13, TlsReorderDatagram13,
                          ::testing::Values(true, false));
 INSTANTIATE_TEST_SUITE_P(DatagramFragment13, TlsFragmentationAndRecoveryTest,
                          ::testing::Values(true, false));
+
+class FirstDropThenKeepHandshakeFilter : public TlsHandshakeFilter {
+ public:
+  FirstDropThenKeepHandshakeFilter(const std::shared_ptr<TlsAgent>& a)
+      : TlsHandshakeFilter(a) {}
+
+  virtual PacketFilter::Action FilterHandshake(
+      const TlsHandshakeFilter::HandshakeHeader& header,
+      const DataBuffer& input, DataBuffer* output) {
+    if (enabled) {
+      return KEEP;
+    } else {
+      enabled = true;
+      return DROP;
+    }
+  }
+
+ private:
+  bool enabled = false;
+};
+
+// This test is responsible for checking that when DTLS fragments the message,
+// the hanshake will be successfully reconstructed, but if one of handshakes
+// was dropped, they are not going to be glued all together.
+
+// See: https://bugzilla.mozilla.org/show_bug.cgi?id=1874451
+TEST_F(TlsConnectDatagram13, PreviousHandshakeRemovedWhenDropped) {
+  EnsureTlsSetup();
+  static const std::vector<SSLNamedGroup> client_groups = {
+      ssl_grp_ec_secp384r1, ssl_grp_ec_secp521r1, ssl_grp_ec_curve25519};
+  client_->ConfigNamedGroups(client_groups);
+  // Ensure that the message is indeed longer than the MTU we install.
+  EXPECT_EQ(SECSuccess, SSL_SendAdditionalKeyShares(client_->ssl_fd(), 2));
+
+  SSLInt_SetMTU(client_->ssl_fd(), 150);
+  auto filter = MakeTlsFilter<FirstDropThenKeepHandshakeFilter>(client_);
+  Connect();
+}
 
 }  // namespace nss_test

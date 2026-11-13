@@ -22,8 +22,9 @@
  * limitations under the License.
  */
 
-#include "mozpkix/pkixcheck.h"
+#include <optional>
 
+#include "mozpkix/pkixcheck.h"
 #include "mozpkix/pkixder.h"
 #include "mozpkix/pkixutil.h"
 
@@ -41,7 +42,7 @@ CheckSignatureAlgorithm(TrustDomain& trustDomain,
 {
   // 4.1.1.2. signatureAlgorithm
   der::PublicKeyAlgorithm publicKeyAlg;
-  DigestAlgorithm digestAlg;
+  std::optional<DigestAlgorithm> digestAlg = std::nullopt;
   Reader signatureAlgorithmReader(signedData.algorithm);
   Result rv = der::SignatureAlgorithmIdentifierValue(signatureAlgorithmReader,
                                                      publicKeyAlg, digestAlg);
@@ -52,10 +53,13 @@ CheckSignatureAlgorithm(TrustDomain& trustDomain,
   if (rv != Success) {
     return rv;
   }
+  if (!der::HasConsistentDigest(publicKeyAlg, digestAlg)) {
+    return Result::ERROR_INVALID_ALGORITHM;
+  }
 
   // 4.1.2.3. Signature
   der::PublicKeyAlgorithm signedPublicKeyAlg;
-  DigestAlgorithm signedDigestAlg;
+  std::optional<DigestAlgorithm> signedDigestAlg = std::nullopt;
   Reader signedSignatureAlgorithmReader(signatureValue);
   rv = der::SignatureAlgorithmIdentifierValue(signedSignatureAlgorithmReader,
                                               signedPublicKeyAlg,
@@ -66,6 +70,9 @@ CheckSignatureAlgorithm(TrustDomain& trustDomain,
   rv = der::End(signedSignatureAlgorithmReader);
   if (rv != Success) {
     return rv;
+  }
+  if (!der::HasConsistentDigest(signedPublicKeyAlg, signedDigestAlg)) {
+    return Result::ERROR_INVALID_ALGORITHM;
   }
 
   // "This field MUST contain the same algorithm identifier as the
@@ -92,10 +99,13 @@ CheckSignatureAlgorithm(TrustDomain& trustDomain,
   // more generally it short-circuits any path building with them (which, of
   // course, is even slower).
 
-  rv = trustDomain.CheckSignatureDigestAlgorithm(digestAlg, endEntityOrCA,
-                                                 notBefore);
-  if (rv != Success) {
-    return rv;
+  if (digestAlg.has_value()) {
+    rv = trustDomain.CheckSignatureDigestAlgorithm(digestAlg.value(),
+                                                   endEntityOrCA,
+                                                   notBefore);
+    if (rv != Success) {
+      return rv;
+    }
   }
 
   switch (publicKeyAlg) {
@@ -118,6 +128,11 @@ CheckSignatureAlgorithm(TrustDomain& trustDomain,
       // for any curve that we support, the chances of us encountering a curve
       // during path building is too low to be worth bothering with.
       break;
+
+    case der::PublicKeyAlgorithm::MLDSA_44:  // fall through
+    case der::PublicKeyAlgorithm::MLDSA_65:  // fall through
+    case der::PublicKeyAlgorithm::MLDSA_87:
+      break;
     MOZILLA_PKIX_UNREACHABLE_DEFAULT_ENUM
   }
 
@@ -131,9 +146,11 @@ CheckIssuer(Input encodedIssuer)
 {
   // "The issuer field MUST contain a non-empty distinguished name (DN)."
   Reader issuer(encodedIssuer);
-  Input encodedRDNs;
-  ExpectTagAndGetValue(issuer, der::SEQUENCE, encodedRDNs);
-  Reader rdns(encodedRDNs);
+  Reader rdns;
+  Result rv = der::ExpectTagAndGetValueAtEnd(issuer, der::SEQUENCE, rdns);
+  if (rv != Success) {
+    return rv;
+  }
   // Check that the issuer name contains at least one RDN
   // (Note: this does not check related grammar rules, such as there being one
   // or more AVAs in each RDN, or the values in AVAs not being empty strings)
@@ -195,6 +212,59 @@ CheckValidity(Time time, Time notBefore, Time notAfter)
 
 // 4.1.2.7 Subject Public Key Info
 
+namespace {
+
+// Returns true, and sets parameterSet, if algorithmOID is one of the ML-DSA
+// public key algorithm OIDs.
+bool
+IsMLDSA(Reader& algorithmOID, /*out*/ MLDSAParameterSet& parameterSet)
+{
+  // RFC 9881 Section 2
+  // python DottedOIDToCode.py id-ml-dsa-44 2.16.840.1.101.3.4.3.17
+  static const uint8_t id_ml_dsa_44[] = {
+    0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x11
+  };
+  // python DottedOIDToCode.py id-ml-dsa-65 2.16.840.1.101.3.4.3.18
+  static const uint8_t id_ml_dsa_65[] = {
+    0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x12
+  };
+  // python DottedOIDToCode.py id-ml-dsa-87 2.16.840.1.101.3.4.3.19
+  static const uint8_t id_ml_dsa_87[] = {
+    0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x13
+  };
+
+  if (algorithmOID.MatchRest(id_ml_dsa_44)) {
+    parameterSet = MLDSAParameterSet::ml_dsa_44;
+    return true;
+  }
+  if (algorithmOID.MatchRest(id_ml_dsa_65)) {
+    parameterSet = MLDSAParameterSet::ml_dsa_65;
+    return true;
+  }
+  if (algorithmOID.MatchRest(id_ml_dsa_87)) {
+    parameterSet = MLDSAParameterSet::ml_dsa_87;
+    return true;
+  }
+  return false;
+}
+
+// FIPS 204 Table 2
+Input::size_type
+MLDSAPublicKeyLength(MLDSAParameterSet parameterSet)
+{
+  switch (parameterSet) {
+    case MLDSAParameterSet::ml_dsa_44:
+      return 1312;
+    case MLDSAParameterSet::ml_dsa_65:
+      return 1952;
+    case MLDSAParameterSet::ml_dsa_87:
+      return 2592;
+    MOZILLA_PKIX_UNREACHABLE_DEFAULT_ENUM
+  }
+}
+
+} // namespace
+
 Result
 CheckSubjectPublicKeyInfoContents(Reader& input, TrustDomain& trustDomain,
                                   EndEntityOrCA endEntityOrCA)
@@ -246,6 +316,7 @@ CheckSubjectPublicKeyInfoContents(Reader& input, TrustDomain& trustDomain,
     0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01
   };
 
+  MLDSAParameterSet mldsaParameterSet = MLDSAParameterSet::ml_dsa_44;
   if (algorithmOID.MatchRest(id_ecPublicKey)) {
     // An id-ecPublicKey AlgorithmIdentifier has a parameter that identifes
     // the curve being used. Although RFC 5480 specifies multiple forms, we
@@ -359,6 +430,30 @@ CheckSubjectPublicKeyInfoContents(Reader& input, TrustDomain& trustDomain,
     if (rv != Success) {
       return rv;
     }
+  } else if (IsMLDSA(algorithmOID, mldsaParameterSet)) {
+    // RFC 9881 Section 2 says "The contents of the parameters component for
+    // each algorithm MUST be absent."
+    rv = der::End(algorithm);
+    if (rv != Success) {
+      return rv;
+    }
+
+    rv = trustDomain.CheckMLDSAParameterSetIsAcceptable(endEntityOrCA,
+                                                        mldsaParameterSet);
+    if (rv != Success) {
+      return rv;
+    }
+
+    // The public key is the raw output of ML-DSA.KeyGen (FIPS 204 Algorithm
+    // 22, pkEncode), not wrapped in any further encoding.
+    Input publicKey;
+    rv = subjectPublicKeyReader.SkipToEnd(publicKey);
+    if (rv != Success) {
+      return rv;
+    }
+    if (publicKey.GetLength() != MLDSAPublicKeyLength(mldsaParameterSet)) {
+      return Result::ERROR_BAD_DER;
+    }
   } else {
     return Result::ERROR_UNSUPPORTED_KEYALG;
   }
@@ -420,7 +515,7 @@ CheckKeyUsage(EndEntityOrCA endEntityOrCA, const Input* encodedKeyUsage,
 
   Reader input(*encodedKeyUsage);
   Reader value;
-  if (der::ExpectTagAndGetValue(input, der::BIT_STRING, value) != Success) {
+  if (der::ExpectTagAndGetValueAtEnd(input, der::BIT_STRING, value) != Success) {
     return Result::ERROR_INADEQUATE_KEY_USAGE;
   }
 
@@ -725,9 +820,7 @@ CheckBasicConstraints(EndEntityOrCA endEntityOrCA,
 
 static Result
 MatchEKU(Reader& value, KeyPurposeId requiredEKU,
-         EndEntityOrCA endEntityOrCA, TrustDomain& trustDomain,
-         Time notBefore, /*in/out*/ bool& found,
-         /*in/out*/ bool& foundOCSPSigning)
+         /*in/out*/ bool& found, /*in/out*/ bool& foundOCSPSigning)
 {
   // See Section 5.9 of "A Layman's Guide to a Subset of ASN.1, BER, and DER"
   // for a description of ASN.1 DER encoding of OIDs.
@@ -746,35 +839,23 @@ MatchEKU(Reader& value, KeyPurposeId requiredEKU,
   static const uint8_t code  [] = { (40*1)+3, 6, 1, 5, 5, 7, 3, 3 };
   static const uint8_t email [] = { (40*1)+3, 6, 1, 5, 5, 7, 3, 4 };
   static const uint8_t ocsp  [] = { (40*1)+3, 6, 1, 5, 5, 7, 3, 9 };
-
-  // id-Netscape        OBJECT IDENTIFIER ::= { 2 16 840 1 113730 }
-  // id-Netscape-policy OBJECT IDENTIFIER ::= { id-Netscape 4 }
-  // id-Netscape-stepUp OBJECT IDENTIFIER ::= { id-Netscape-policy 1 }
-  static const uint8_t serverStepUp[] =
-    { (40*2)+16, 128+6,72, 1, 128+6,128+120,66, 4, 1 };
+  // RFC 9336 - X.509 Certificate General-Purpose Extended Key Usage (EKU) for
+  // Document Signing id-kp-documentSigning OBJECT IDENTIFIER ::= { id-kp 36 }
+  static const uint8_t documentSigning[] = { (40*1)+3, 6, 1, 5, 5, 7, 3, 36 };
+  // 1.2.840.113583.1.1.5 (Adobe Authentic Documents Trust)
+  // {iso(1) member-body(2) us(840) adbe(113583) acrobat(1) security(1) 5}
+  static const uint8_t documentSigningAdobe[] = { (40*1)+2, 128+6, 72, 128+6, 128+119, 47, 1, 1, 5 };
+  // 1.3.6.1.4.1.311.10.3.12 (Microsoft Document Signing OID)
+  // {iso(1) identified-organization(3) dod(6) internet(1) private(4) enterprise(1) 311 10 3 12}
+  static const uint8_t documentSigningMicrosoft[] = { (40*1)+3, 6, 1, 4, 1, 128+2, 55, 10, 3, 12 };
 
   bool match = false;
 
   if (!found) {
     switch (requiredEKU) {
-      case KeyPurposeId::id_kp_serverAuth: {
-        if (value.MatchRest(server)) {
-          match = true;
-          break;
-        }
-        // Potentially treat CA certs with step-up OID as also having SSL server
-        // type. Comodo has issued certificates that require this behavior that
-        // don't expire until June 2020!
-        if (endEntityOrCA == EndEntityOrCA::MustBeCA &&
-            value.MatchRest(serverStepUp)) {
-          Result rv = trustDomain.NetscapeStepUpMatchesServerAuth(notBefore,
-                                                                  match);
-          if (rv != Success) {
-            return rv;
-          }
-        }
+      case KeyPurposeId::id_kp_serverAuth:
+        match = value.MatchRest(server);
         break;
-      }
 
       case KeyPurposeId::id_kp_clientAuth:
         match = value.MatchRest(client);
@@ -790,6 +871,18 @@ MatchEKU(Reader& value, KeyPurposeId requiredEKU,
 
       case KeyPurposeId::id_kp_OCSPSigning:
         match = value.MatchRest(ocsp);
+        break;
+
+      case KeyPurposeId::id_kp_documentSigning:
+        match = value.MatchRest(documentSigning);
+        break;
+
+      case KeyPurposeId::id_kp_documentSigningAdobe:
+        match = value.MatchRest(documentSigningAdobe);
+        break;
+
+      case KeyPurposeId::id_kp_documentSigningMicrosoft:
+        match = value.MatchRest(documentSigningMicrosoft);
         break;
 
       case KeyPurposeId::anyExtendedKeyUsage:
@@ -815,8 +908,7 @@ MatchEKU(Reader& value, KeyPurposeId requiredEKU,
 Result
 CheckExtendedKeyUsage(EndEntityOrCA endEntityOrCA,
                       const Input* encodedExtendedKeyUsage,
-                      KeyPurposeId requiredEKU, TrustDomain& trustDomain,
-                      Time notBefore)
+                      KeyPurposeId requiredEKU)
 {
   // XXX: We're using Result::ERROR_INADEQUATE_CERT_TYPE here so that callers
   // can distinguish EKU mismatch from KU mismatch from basic constraints
@@ -831,8 +923,7 @@ CheckExtendedKeyUsage(EndEntityOrCA endEntityOrCA,
     Reader input(*encodedExtendedKeyUsage);
     Result rv = der::NestedOf(input, der::SEQUENCE, der::OIDTag,
                               der::EmptyAllowed::No, [&](Reader& r) {
-      return MatchEKU(r, requiredEKU, endEntityOrCA, trustDomain, notBefore,
-                      found, foundOCSPSigning);
+      return MatchEKU(r, requiredEKU, found, foundOCSPSigning);
     });
     if (rv != Success) {
       return Result::ERROR_INADEQUATE_CERT_TYPE;
@@ -914,7 +1005,7 @@ TLSFeaturesSatisfiedInternal(const Input* requiredTLSFeatures,
   const static uint8_t status_request_bytes[] = { status_request };
 
   Reader input(*requiredTLSFeatures);
-  return der::NestedOf(input, der::SEQUENCE, der::INTEGER,
+  Result rv = der::NestedOf(input, der::SEQUENCE, der::INTEGER,
                        der::EmptyAllowed::No, [&](Reader& r) {
     if (!r.MatchRest(status_request_bytes)) {
       return Result::ERROR_REQUIRED_TLS_FEATURE_MISSING;
@@ -926,6 +1017,10 @@ TLSFeaturesSatisfiedInternal(const Input* requiredTLSFeatures,
 
     return Result::Success;
   });
+  if (rv != Success) {
+    return rv;
+  }
+  return der::End(input);
 }
 
 Result
@@ -1065,7 +1160,7 @@ CheckIssuerIndependentProperties(TrustDomain& trustDomain,
 
   // 4.2.1.12. Extended Key Usage
   rv = CheckExtendedKeyUsage(endEntityOrCA, cert.GetExtKeyUsage(),
-                             requiredEKUIfPresent, trustDomain, notBefore);
+                             requiredEKUIfPresent);
   if (rv != Success) {
     return rv;
   }

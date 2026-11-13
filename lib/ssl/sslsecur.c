@@ -143,7 +143,7 @@ ssl_SetTimeout(PRFileDesc *fd, PRIntervalTime timeout)
 }
 
 /* Acquires and releases HandshakeLock.
-*/
+ */
 SECStatus
 SSL_ResetHandshake(PRFileDesc *s, PRBool asServer)
 {
@@ -169,19 +169,20 @@ SSL_ResetHandshake(PRFileDesc *s, PRBool asServer)
 
     ss->firstHsDone = PR_FALSE;
     ss->enoughFirstHsDone = PR_FALSE;
+    ss->sec.isServer = asServer;
     if (asServer) {
         ss->handshake = ssl_BeginServerHandshake;
-        ss->handshaking = sslHandshakingAsServer;
     } else {
         ss->handshake = ssl_BeginClientHandshake;
-        ss->handshaking = sslHandshakingAsClient;
     }
 
     ssl_GetRecvBufLock(ss);
     status = ssl3_InitGather(&ss->gs);
     ssl_ReleaseRecvBufLock(ss);
-    if (status != SECSuccess)
+    if (status != SECSuccess) {
+        ssl_Release1stHandshakeLock(ss);
         goto loser;
+    }
 
     ssl_GetSSL3HandshakeLock(ss);
     ss->ssl3.hs.canFalseStart = PR_FALSE;
@@ -194,9 +195,6 @@ SSL_ResetHandshake(PRFileDesc *s, PRBool asServer)
     ssl_ResetSecurityInfo(&ss->sec, PR_TRUE);
     status = ssl_CreateSecurityInfo(ss);
     ssl_ReleaseXmitBufLock(ss);
-
-    ssl_ReleaseSSL3HandshakeLock(ss);
-    ssl_Release1stHandshakeLock(ss);
 
     ssl3_DestroyRemoteExtensions(&ss->ssl3.hs.remoteExtensions);
     ssl3_DestroyRemoteExtensions(&ss->ssl3.hs.echOuterExtensions);
@@ -220,6 +218,9 @@ SSL_ResetHandshake(PRFileDesc *s, PRBool asServer)
     tls13_ClientGreaseDestroy(ss);
 
     tls_ClientHelloExtensionPermutationDestroy(ss);
+
+    ssl_ReleaseSSL3HandshakeLock(ss);
+    ssl_Release1stHandshakeLock(ss);
 
     if (!ss->TCPconnected)
         ss->TCPconnected = (PR_SUCCESS == ssl_DefGetpeername(ss, &addr));
@@ -264,7 +265,7 @@ SSL_ReHandshake(PRFileDesc *fd, PRBool flushCache)
 
 /*
 ** Same as above, but with an I/O timeout.
- */
+*/
 SSL_IMPORT SECStatus
 SSL_ReHandshakeWithTimeout(PRFileDesc *fd,
                            PRBool flushCache,
@@ -488,7 +489,12 @@ ssl_SendSavedWriteData(sslSocket *ss)
         if (rv < 0) {
             return rv;
         }
-        ss->pendingBuf.len -= rv;
+        if (rv > ss->pendingBuf.len) {
+            PORT_Assert(0); /* This shouldn't happen */
+            ss->pendingBuf.len = 0;
+        } else {
+            ss->pendingBuf.len -= rv;
+        }
         if (ss->pendingBuf.len > 0 && rv > 0) {
             /* UGH !! This shifts the whole buffer down by copying it */
             PORT_Memmove(ss->pendingBuf.buf, ss->pendingBuf.buf + rv,
@@ -626,9 +632,12 @@ ssl_CopySecurityInfo(sslSocket *ss, sslSocket *os)
 {
     ss->sec.isServer = os->sec.isServer;
 
-    ss->sec.peerCert = CERT_DupCertificate(os->sec.peerCert);
-    if (os->sec.peerCert && !ss->sec.peerCert)
-        goto loser;
+    if (os->sec.peerCertDER.data) {
+        if (ssl_SetPeerCertificate(&ss->sec, &os->sec.peerCertDER) !=
+            SECSuccess) {
+            goto loser;
+        }
+    }
 
     return SECSuccess;
 
@@ -646,10 +655,7 @@ ssl_ResetSecurityInfo(sslSecurityInfo *sec, PRBool doMemset)
         CERT_DestroyCertificate(sec->localCert);
         sec->localCert = NULL;
     }
-    if (sec->peerCert) {
-        CERT_DestroyCertificate(sec->peerCert);
-        sec->peerCert = NULL;
-    }
+    ssl_ClearPeerCertificate(sec);
     if (sec->peerKey) {
         SECKEY_DestroyPublicKey(sec->peerKey);
         sec->peerKey = NULL;
@@ -689,12 +695,11 @@ ssl_SecureConnect(sslSocket *ss, const PRNetAddr *sa)
     PRFileDesc *osfd = ss->fd->lower;
     int rv;
 
+    ss->sec.isServer = ss->opt.handshakeAsServer ? PR_TRUE : PR_FALSE;
     if (ss->opt.handshakeAsServer) {
         ss->handshake = ssl_BeginServerHandshake;
-        ss->handshaking = sslHandshakingAsServer;
     } else {
         ss->handshake = ssl_BeginClientHandshake;
-        ss->handshaking = sslHandshakingAsClient;
     }
 
     /* connect to server */
@@ -781,8 +786,7 @@ tls13_CheckKeyUpdate(sslSocket *ss, SSLSecretDirection dir)
     tls13KeyUpdateRequest keyUpdateRequest;
     SECStatus rv = SECSuccess;
 
-    /* Bug 1413368: enable for DTLS */
-    if (ss->version < SSL_LIBRARY_VERSION_TLS_1_3 || IS_DTLS(ss)) {
+    if (ss->version < SSL_LIBRARY_VERSION_TLS_1_3) {
         return SECSuccess;
     }
 
@@ -817,8 +821,8 @@ tls13_CheckKeyUpdate(sslSocket *ss, SSLSecretDirection dir)
     keyUpdateRequest = (dir == ssl_secret_read) ? update_requested : update_not_requested;
     ssl_GetSSL3HandshakeLock(ss);
     if (ss->ssl3.clientCertRequested) {
-        ss->ssl3.keyUpdateDeferred = PR_TRUE;
-        ss->ssl3.deferredKeyUpdateRequest = keyUpdateRequest;
+        ss->ssl3.hs.keyUpdateDeferred = PR_TRUE;
+        ss->ssl3.hs.deferredKeyUpdateRequest = keyUpdateRequest;
     } else {
         rv = tls13_SendKeyUpdate(ss, keyUpdateRequest,
                                  dir == ssl_secret_write /* buffer */);

@@ -79,8 +79,7 @@ class CodeSigningTrustDomain final : public TrustDomain {
       EndEntityOrCA endEntityOrCA, const CertID& certID, Time time,
       Duration validityDuration,
       /*optional*/ const Input* stapledOCSPresponse,
-      /*optional*/ const Input* aiaExtension,
-      /*optional*/ const Input* sctExtension) override {
+      /*optional*/ const Input* aiaExtension) override {
     return Success;
   }
 
@@ -143,15 +142,32 @@ class CodeSigningTrustDomain final : public TrustDomain {
         subjectPublicKeyInfo, nullptr);
   }
 
+  virtual Result CheckMLDSAParameterSetIsAcceptable(
+      EndEntityOrCA endEntityOrCA, MLDSAParameterSet parameterSet) override {
+    switch (parameterSet) {
+      case MLDSAParameterSet::ml_dsa_44:  // fall through
+      case MLDSAParameterSet::ml_dsa_65:  // fall through
+      case MLDSAParameterSet::ml_dsa_87:
+        return Success;
+    }
+
+    return Result::ERROR_UNSUPPORTED_KEYALG;
+  }
+
+  virtual Result VerifyMLDSASignedData(Input data,
+                                       MLDSAParameterSet parameterSet,
+                                       Input signature,
+                                       Input subjectPublicKeyInfo) override {
+    return VerifyMLDSASignedDataNSS(data,
+                                    parameterSet,
+                                    signature,
+                                    subjectPublicKeyInfo,
+                                    nullptr);
+  }
+
   virtual Result CheckValidityIsAcceptable(Time notBefore, Time notAfter,
                                            EndEntityOrCA endEntityOrCA,
                                            KeyPurposeId keyPurpose) override {
-    return Success;
-  }
-
-  virtual Result NetscapeStepUpMatchesServerAuth(
-      Time notBefore, /*out*/ bool& matches) override {
-    matches = false;
     return Success;
   }
 
@@ -179,6 +195,11 @@ class CodeSigningNameMatchingPolicy : public NameMatchingPolicy {
     fallBackToCommonName = FallBackToSearchWithinSubject::No;
     return Success;
   }
+
+  virtual HandleInvalidSubjectAlternativeNamesBy
+  HandleInvalidSubjectAlternativeNames() override {
+    return HandleInvalidSubjectAlternativeNamesBy::Halting;
+  }
 };
 
 bool VerifyCodeSigningCertificateChain(
@@ -189,7 +210,8 @@ bool VerifyCodeSigningCertificateChain(
   if (!error) {
     return false;
   }
-  if (!certificates || !certificateLengths || !rootSHA256Digest) {
+  if (!certificates || !certificateLengths || numCertificates < 1 ||
+      !rootSHA256Digest) {
     *error = SEC_ERROR_INVALID_ARGS;
     return false;
   }

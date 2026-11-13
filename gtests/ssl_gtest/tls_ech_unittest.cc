@@ -13,10 +13,11 @@
 #include "tls_connect.h"
 #include "util.h"
 #include "tls13ech.h"
+#include "pk11_import.h"
 
 namespace nss_test {
 
-class TlsAgentEchTest : public TlsAgentTestClient13 {
+class TlsAgentEchTest : public TlsAgentStreamTestClient13 {
  protected:
   void InstallEchConfig(const DataBuffer& echconfig, PRErrorCode err = 0) {
     SECStatus rv = SSL_SetClientEchConfigs(agent_->ssl_fd(), echconfig.data(),
@@ -33,6 +34,13 @@ class TlsAgentEchTest : public TlsAgentTestClient13 {
 #include "cpputil.h"  // Unused function error if included without HPKE.
 
 static std::string kPublicName("public.name");
+
+// With HRR, the ECH server restores its HPKE context from the cookie using
+// PK11_HPKE_ImportContext without a wrapping key, which a FIPS token refuses.
+#define SKIP_ECH_HRR_IN_FIPS()                                  \
+  if (PK11_IsFIPS()) {                                          \
+    GTEST_SKIP() << "ECH server HRR doesn't work in FIPS mode"; \
+  }
 
 static const std::vector<HpkeSymmetricSuite> kDefaultSuites = {
     {HpkeKdfHkdfSha256, HpkeAeadChaCha20Poly1305},
@@ -111,10 +119,9 @@ class TlsConnectStreamTls13Ech : public TlsConnectTestBase {
     DataBuffer name;
     ASSERT_TRUE(parser.ReadVariable(&name, 2));
     ASSERT_EQ(0U, parser.remaining());
-    // Manual comparison to silence coverity false-positives.
-    ASSERT_EQ(name.len(), kPublicName.length());
-    ASSERT_EQ(0,
-              memcmp(kPublicName.c_str(), name.data(), kPublicName.length()));
+    std::string captured_name(reinterpret_cast<const char*>(name.data()),
+                              name.len());
+    EXPECT_EQ(expected_name, captured_name);
   }
 
   void DoEchRetry(const ScopedSECKEYPublicKey& server_pub,
@@ -153,7 +160,7 @@ class TlsConnectStreamTls13Ech : public TlsConnectTestBase {
                             static_cast<unsigned int>(pkcs8_r.size())};
 
     SECKEYPrivateKey* tmp_priv = nullptr;
-    ASSERT_EQ(SECSuccess, PK11_ImportDERPrivateKeyInfoAndReturnKey(
+    ASSERT_EQ(SECSuccess, nss_test::ImportDERPrivateKeyInfoAndReturnKey(
                               slot.get(), &pkcs8_r_item, nullptr, nullptr,
                               false, false, KU_ALL, &tmp_priv, nullptr));
     priv.reset(tmp_priv);
@@ -163,17 +170,64 @@ class TlsConnectStreamTls13Ech : public TlsConnectTestBase {
   }
 
   void SetMutualEchConfigs(ScopedSECKEYPublicKey& pub,
-                           ScopedSECKEYPrivateKey& priv) {
+                           ScopedSECKEYPrivateKey& priv,
+                           HpkeKemId kem = HpkeDhKemX25519Sha256) {
     DataBuffer echconfig;
-    TlsConnectTestBase::GenerateEchConfig(HpkeDhKemX25519Sha256, kDefaultSuites,
-                                          kPublicName, 100, echconfig, pub,
-                                          priv);
+    TlsConnectTestBase::GenerateEchConfig(kem, kDefaultSuites, kPublicName, 100,
+                                          echconfig, pub, priv);
     ASSERT_EQ(SECSuccess,
               SSL_SetServerEchConfigs(server_->ssl_fd(), pub.get(), priv.get(),
                                       echconfig.data(), echconfig.len()));
     ASSERT_EQ(SECSuccess,
               SSL_SetClientEchConfigs(client_->ssl_fd(), echconfig.data(),
                                       echconfig.len()));
+  }
+
+  void UseKem(HpkeKemId kem, SECOidTag oid) {
+    SECOidData* oidData = SECOID_FindOIDByTag(oid);
+    ASSERT_TRUE(!!oidData);
+
+    ASSERT_LT(oidData->oid.len, 128U);  // one-byte DER length limit
+    std::vector<uint8_t> buf(2 + oidData->oid.len);
+    SECItem ecp = {siDEROID, buf.data(), static_cast<unsigned int>(buf.size())};
+    buf[0] = SEC_ASN1_OBJECT_ID;
+    buf[1] = static_cast<uint8_t>(oidData->oid.len);
+    PORT_Memcpy(&buf[2], oidData->oid.data, oidData->oid.len);
+
+    ScopedPK11SlotInfo slot(PK11_GetInternalSlot());
+    ASSERT_TRUE(!!slot);
+
+    SECKEYPublicKey* pk_ptr = NULL;
+    SECKEYPrivateKey* sk_ptr =
+        PK11_GenerateKeyPair(slot.get(), CKM_EC_KEY_PAIR_GEN, &ecp, &pk_ptr,
+                             PR_FALSE, PR_TRUE, NULL);
+    ScopedSECKEYPublicKey pub(pk_ptr);
+    ScopedSECKEYPrivateKey priv(sk_ptr);
+
+    SetMutualEchConfigs(pub, priv, kem);
+  }
+
+  //   struct {
+  //      ECHClientHelloType type;                // 1B, outer(0)
+  //      HpkeSymmetricCipherSuite cipher_suite;  // 4B
+  //      uint8 config_id;                        // 1B
+  //      opaque enc<0..2^16-1>;
+  //      opaque payload<1..2^16-1>;              // inner || AEAD tag
+  //   } ECHClientHello;
+  size_t ConnectAndGetEchInnerLen() {
+    auto ech_xtn = MakeTlsFilter<TlsExtensionCapture>(
+        client_, ssl_tls13_encrypted_client_hello_xtn);
+    Connect();
+
+    EXPECT_TRUE(ech_xtn->captured());
+    const DataBuffer& ext = ech_xtn->extension();
+    uint32_t enc_len = 0;
+    uint32_t payload_len = 0;
+    EXPECT_TRUE(ext.len() > 0 && ext.data()[0] == ech_xtn_type_outer);
+    EXPECT_TRUE(ext.Read(6, 2, &enc_len));
+    EXPECT_TRUE(ext.Read(8 + static_cast<size_t>(enc_len), 2, &payload_len));
+    EXPECT_GE(payload_len, static_cast<uint32_t>(TLS13_ECH_AEAD_TAG_LEN));
+    return payload_len - TLS13_ECH_AEAD_TAG_LEN;
   }
 
   void ValidatePublicNames(const std::vector<std::string>& names,
@@ -264,9 +318,6 @@ static DataBuffer MakeEchConfigList(DataBuffer config1, DataBuffer config2) {
 }
 
 TEST_P(TlsAgentEchTest, EchConfigsSupportedYesNo) {
-  if (variant_ == ssl_variant_datagram) {
-    GTEST_SKIP();
-  }
   ScopedSECKEYPublicKey pub;
   ScopedSECKEYPrivateKey priv;
   // ECHConfig 2 cipher_suites are unsupported.
@@ -290,9 +341,6 @@ TEST_P(TlsAgentEchTest, EchConfigsSupportedYesNo) {
 }
 
 TEST_P(TlsAgentEchTest, EchConfigsSupportedNoYes) {
-  if (variant_ == ssl_variant_datagram) {
-    GTEST_SKIP();
-  }
   ScopedSECKEYPublicKey pub;
   ScopedSECKEYPrivateKey priv;
   DataBuffer config2;
@@ -315,10 +363,6 @@ TEST_P(TlsAgentEchTest, EchConfigsSupportedNoYes) {
 }
 
 TEST_P(TlsAgentEchTest, EchConfigsSupportedNoNo) {
-  if (variant_ == ssl_variant_datagram) {
-    GTEST_SKIP();
-  }
-
   ScopedSECKEYPublicKey pub;
   ScopedSECKEYPrivateKey priv;
   DataBuffer config2;
@@ -636,6 +680,47 @@ TEST_F(TlsConnectStreamTls13Ech, EchFixedConfig) {
   EnsureTlsSetup();
   ImportFixedEchKeypair(pub, priv);
   SetMutualEchConfigs(pub, priv);
+
+  client_->ExpectEch();
+  server_->ExpectEch();
+  Connect();
+}
+
+TEST_F(TlsConnectTest, RenegotiateClientECHGrease) {
+  EnsureTlsSetup();
+
+  // Client speaks 1.2 or 1.3, with ECH GREASE enabled.
+  client_->SetVersionRange(SSL_LIBRARY_VERSION_TLS_1_2,
+                           SSL_LIBRARY_VERSION_TLS_1_3);
+  EXPECT_EQ(SECSuccess, SSL_EnableTls13GreaseEch(client_->ssl_fd(), PR_TRUE));
+
+  // Server speaks 1.2
+  server_->SetVersionRange(SSL_LIBRARY_VERSION_TLS_1_2,
+                           SSL_LIBRARY_VERSION_TLS_1_2);
+
+  Connect();
+
+  // Renegotiation
+  client_->PrepareForRenegotiate();
+  server_->StartRenegotiate();
+  Handshake();
+  CheckConnected();
+}
+
+TEST_F(TlsConnectStreamTls13Ech, EchP256) {
+  EnsureTlsSetup();
+
+  UseKem(HpkeDhKemP256Sha256, SEC_OID_ANSIX962_EC_PRIME256V1);
+
+  client_->ExpectEch();
+  server_->ExpectEch();
+  Connect();
+}
+
+TEST_F(TlsConnectStreamTls13Ech, EchP384) {
+  EnsureTlsSetup();
+
+  UseKem(HpkeDhKemP384Sha384, SEC_OID_SECG_EC_SECP384R1);
 
   client_->ExpectEch();
   server_->ExpectEch();
@@ -1013,6 +1098,35 @@ TEST_F(TlsConnectStreamTls13Ech, EchConfigList) {
   ASSERT_EQ(rv, SECSuccess);
 }
 
+// Verify that ssl_DupSocket correctly copies each ECH config.
+TEST_F(TlsConnectStreamTls13Ech, EchDupSocketCopiesAllConfigs) {
+  ScopedSECKEYPublicKey pub1, pub2;
+  ScopedSECKEYPrivateKey priv1, priv2;
+  DataBuffer config1, config2;
+  EnsureTlsSetup();
+
+  std::string name1("first.name"), name2("second.name");
+  TlsConnectTestBase::GenerateEchConfig(HpkeDhKemX25519Sha256, kDefaultSuites,
+                                        name1, 100, config1, pub1, priv1);
+  TlsConnectTestBase::GenerateEchConfig(HpkeDhKemX25519Sha256, kDefaultSuites,
+                                        name2, 100, config2, pub2, priv2);
+  DataBuffer configList = MakeEchConfigList(config1, config2);
+  ASSERT_EQ(SECSuccess,
+            SSL_SetClientEchConfigs(client_->ssl_fd(), configList.data(),
+                                    configList.len()));
+
+  // Exercise ssl_DupSocket (and tls13_CopyEchConfigs) by importing the
+  // client as a model onto the server fd.
+  ASSERT_NE(nullptr, SSL_ImportFD(client_->ssl_fd(), server_->ssl_fd()));
+
+  // Bug 2020614: tls13_CopyEchConfigs used PR_LIST_TAIL instead of cur_p,
+  // so all entries in the copied list were copies of the last config.
+  EXPECT_STREQ(name1.c_str(),
+               SSLInt_GetEchConfigPublicName(server_->ssl_fd(), 0));
+  EXPECT_STREQ(name2.c_str(),
+               SSLInt_GetEchConfigPublicName(server_->ssl_fd(), 1));
+}
+
 TEST_F(TlsConnectStreamTls13Ech, EchConfigsTrialDecrypt) {
   // Apply two ECHConfigs on the server. They are identical with the exception
   // of the public key: the first ECHConfig contains a public key for which we
@@ -1048,6 +1162,20 @@ TEST_F(TlsConnectStreamTls13Ech, EchConfigsTrialDecrypt) {
 TEST_F(TlsConnectStreamTls13Ech, EchAcceptBasic) {
   EnsureTlsSetup();
   SetupEch(client_, server_);
+  auto c_filter_sni =
+      MakeTlsFilter<TlsExtensionCapture>(client_, ssl_server_name_xtn);
+  Connect();
+  ASSERT_TRUE(c_filter_sni->captured());
+  CheckSniExtension(c_filter_sni->extension(), kPublicName);
+}
+
+// As EchAcceptBasic, but the client sends an uncompressed ClientHelloInner
+// (no outer_extensions), exercising the server's no-outer_extensions
+// reconstruction path.
+TEST_F(TlsConnectStreamTls13Ech, EchAcceptBasicUncompressed) {
+  EnsureTlsSetup();
+  SetupEch(client_, server_, HpkeDhKemX25519Sha256, true, true, true, 100,
+           /* compress_xtns = */ false);
   auto c_filter_sni =
       MakeTlsFilter<TlsExtensionCapture>(client_, ssl_server_name_xtn);
   Connect();
@@ -1095,7 +1223,7 @@ TEST_F(TlsConnectStreamTls13, EchAcceptWithExternalPsk) {
   Handshake();
   CheckConnected();
   SendReceive();
-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_psk, ssl_sig_none);
+  CheckKeys(ssl_auth_psk, ssl_sig_none);
   // The PSK extension is present in CHOuter.
   ASSERT_TRUE(filter->captured());
 
@@ -1112,6 +1240,35 @@ TEST_F(TlsConnectStreamTls13, EchAcceptWithExternalPsk) {
     different |= v != static_cast<uint8_t>(kPskId[i]);
   }
   ASSERT_TRUE(different);
+}
+
+// As EchAcceptWithExternalPsk, but with an uncompressed ClientHelloInner. This
+// exercises the PSK-binder handling in tls13_ConstructInnerExtensionsFromOuter
+// on the no-compression pass together with the server's no-outer_extensions
+// reconstruction path.
+TEST_F(TlsConnectStreamTls13, EchAcceptWithExternalPskUncompressed) {
+  static const std::string kPskId = "testing123";
+  EnsureTlsSetup();
+  SetupEch(client_, server_, HpkeDhKemX25519Sha256, true, true, true, 100,
+           /* compress_xtns = */ false);
+
+  ScopedPK11SlotInfo slot(PK11_GetInternalSlot());
+  ASSERT_TRUE(!!slot);
+  ScopedPK11SymKey key(
+      PK11_KeyGen(slot.get(), CKM_HKDF_KEY_GEN, nullptr, 16, nullptr));
+  ASSERT_TRUE(!!key);
+  AddPsk(key, kPskId, ssl_hash_sha256);
+
+  // Not permitted in outer.
+  auto filter =
+      MakeTlsFilter<TlsExtensionCapture>(client_, ssl_tls13_pre_shared_key_xtn);
+  StartConnect();
+  Handshake();
+  CheckConnected();
+  SendReceive();
+  CheckKeys(ssl_auth_psk, ssl_sig_none);
+  // The PSK extension is present in CHOuter.
+  ASSERT_TRUE(filter->captured());
 }
 
 // If an earlier version is negotiated, False Start must be disabled.
@@ -1152,6 +1309,7 @@ SSLHelloRetryRequestAction RetryEchHello(PRBool firstHello,
 
 // Generate HRR on CH1 Inner
 TEST_F(TlsConnectStreamTls13, EchAcceptWithHrr) {
+  SKIP_ECH_HRR_IN_FIPS();
   ScopedSECKEYPublicKey pub;
   ScopedSECKEYPrivateKey priv;
   DataBuffer echconfig;
@@ -1217,6 +1375,22 @@ TEST_F(TlsConnectStreamTls13Ech, EchGreaseSize) {
 
   ASSERT_TRUE(real_ext->captured());
   ASSERT_EQ(real_ext->extension().len(), greased_ext->extension().len());
+}
+
+// RFC 9849, Section 6.1.3 requires the padded EncodedClientHelloInner to be a
+// multiple of 32 bytes.
+TEST_F(TlsConnectStreamTls13Ech, EchInnerPaddingBlockAligned) {
+  const size_t kSniLen = strlen("server");
+  for (size_t max_name_len = kSniLen + 1; max_name_len <= kSniLen + 32;
+       max_name_len++) {
+    Reset();
+    EnsureTlsSetup();
+    SetupEch(client_, server_, HpkeDhKemX25519Sha256, true, true, true,
+             static_cast<int>(max_name_len));
+    size_t inner_len = ConnectAndGetEchInnerLen();
+    EXPECT_EQ(0U, inner_len % 32)
+        << "maxNameLen " << +max_name_len << ", inner length " << inner_len;
+  }
 }
 
 TEST_F(TlsConnectStreamTls13Ech, EchGreaseClientDisable) {
@@ -1342,6 +1516,34 @@ TEST_F(TlsConnectStreamTls13, GreaseEchHrrMatches) {
   CheckConnected();
 }
 
+// A real (group-negotiation) HelloRetryRequest on a single server socket,
+// combined with a client that GREASEs ECH, must not leave stale ECH HRR GREASE
+// state on the server. When the client offers ECH the server records ECH state
+// and writes an ECH HRR GREASE signal into its transient greaseEchBuf while
+// sending the first HRR. That buffer has to be cleared afterwards: the signal
+// is preserved in the cookie and restored when the transcript is reconstructed
+// on the second ClientHello. Previously it was not cleared, so reconstruction
+// tripped PORT_Assert(!ss->ssl3.hs.greaseEchBuf.len) in
+// tls13_ConstructHelloRetryRequest. This reproduces the assertion by having a
+// server that only supports P-256 while the client prefers X25519, forcing a
+// genuine HRR without a stateless MakeNewServer() reset.
+TEST_F(TlsConnectStreamTls13, EchGreaseHrr) {
+  EnsureTlsSetup();
+  // Client offers both, but prefers X25519 so it only sends an X25519 share.
+  client_->ConfigNamedGroups({ssl_grp_ec_curve25519, ssl_grp_ec_secp256r1});
+  // Server only supports P-256, so it must send an HRR requesting it.
+  server_->ConfigNamedGroups({ssl_grp_ec_secp256r1});
+  // GREASE ECH so the server records ECH state and emits an ECH HRR signal.
+  EXPECT_EQ(SECSuccess, SSL_EnableTls13GreaseEch(client_->ssl_fd(), PR_TRUE));
+
+  auto hrr_capture = MakeTlsFilter<TlsHandshakeRecorder>(
+      server_, kTlsHandshakeHelloRetryRequest);
+  Connect();
+  EXPECT_LT(0U, hrr_capture->buffer().len()) << "HelloRetryRequest expected";
+  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_secp256r1, ssl_auth_rsa_sign,
+            ssl_sig_rsa_pss_rsae_sha256);
+}
+
 TEST_F(TlsConnectStreamTls13Ech, EchRejectMisizedEchXtn) {
   ScopedSECKEYPublicKey pub;
   ScopedSECKEYPrivateKey priv;
@@ -1370,6 +1572,7 @@ TEST_F(TlsConnectStreamTls13Ech, EchRejectMisizedEchXtn) {
 }
 
 TEST_F(TlsConnectStreamTls13Ech, EchRejectDroppedEchXtn) {
+  SKIP_ECH_HRR_IN_FIPS();
   ScopedSECKEYPublicKey pub;
   ScopedSECKEYPrivateKey priv;
   DataBuffer echconfig;
@@ -1409,6 +1612,7 @@ TEST_F(TlsConnectStreamTls13Ech, EchRejectDroppedEchXtn) {
 // Generate an HRR on CHInner. Mangle the Hrr Xtn causing client to reject ECH
 // which then causes a MAC mismatch.
 TEST_F(TlsConnectStreamTls13Ech, EchRejectMangledHrrXtn) {
+  SKIP_ECH_HRR_IN_FIPS();
   ScopedSECKEYPublicKey pub;
   ScopedSECKEYPrivateKey priv;
   DataBuffer echconfig;
@@ -1503,6 +1707,7 @@ TEST_F(TlsConnectStreamTls13Ech, EchClientRejectSpuriousHrrXtn) {
 
 // Fail to decrypt CH2. Unlike CH1, this generates an alert.
 TEST_F(TlsConnectStreamTls13, EchFailDecryptCH2) {
+  SKIP_ECH_HRR_IN_FIPS();
   EnsureTlsSetup();
   SetupEch(client_, server_);
   size_t cb_called = 0;
@@ -1577,6 +1782,7 @@ TEST_F(TlsConnectStreamTls13, EchHrrChangeCh2OfferingNY) {
 
 // Change the ECHCipherSuite between CH1 and CH2. Expect alert.
 TEST_F(TlsConnectStreamTls13, EchHrrChangeCipherSuite) {
+  SKIP_ECH_HRR_IN_FIPS();
   ConfigureSelfEncrypt();
   EnsureTlsSetup();
   SetupEch(client_, server_);
@@ -1605,6 +1811,7 @@ TEST_F(TlsConnectStreamTls13, EchHrrChangeCipherSuite) {
 // Configure an external PSK. Generate an HRR off CH1Inner (which contains
 // the PSK extension). Use the same PSK in CH2 and connect.
 TEST_F(TlsConnectStreamTls13, EchAcceptWithHrrAndPsk) {
+  SKIP_ECH_HRR_IN_FIPS();
   ScopedSECKEYPublicKey pub;
   ScopedSECKEYPrivateKey priv;
   DataBuffer echconfig;
@@ -1632,9 +1839,9 @@ TEST_F(TlsConnectStreamTls13, EchAcceptWithHrrAndPsk) {
   const char* label = "foo";
   ScopedPK11SlotInfo slot(PK11_GetInternalSlot());
   ASSERT_TRUE(!!slot);
-  ScopedPK11SymKey key(PK11_ImportSymKey(slot.get(), CKM_HKDF_KEY_GEN,
-                                         PK11_OriginUnwrap, CKA_DERIVE,
-                                         &key_item, nullptr));
+  ScopedPK11SymKey key(nss_test::ImportSymKey(slot.get(), CKM_HKDF_KEY_GEN,
+                                              PK11_OriginUnwrap, CKA_DERIVE,
+                                              &key_item, nullptr));
   ASSERT_TRUE(!!key);
   AddPsk(key, std::string(label), ssl_hash_sha256);
 
@@ -1696,6 +1903,7 @@ TEST_F(TlsConnectStreamTls13Ech, EchRejectWithHrr) {
 // Server can't change its mind on ECH after HRR. We change the confirmation
 // value and the server panics accordingly.
 TEST_F(TlsConnectStreamTls13Ech, EchHrrServerYN) {
+  SKIP_ECH_HRR_IN_FIPS();
   ScopedSECKEYPublicKey pub;
   ScopedSECKEYPrivateKey priv;
   DataBuffer echconfig;
@@ -1814,9 +2022,9 @@ TEST_F(TlsConnectStreamTls13, EchRejectWithHrrAndPsk) {
   const char* label = "foo";
   ScopedPK11SlotInfo slot(PK11_GetInternalSlot());
   ASSERT_TRUE(!!slot);
-  ScopedPK11SymKey key(PK11_ImportSymKey(slot.get(), CKM_HKDF_KEY_GEN,
-                                         PK11_OriginUnwrap, CKA_DERIVE,
-                                         &key_item, nullptr));
+  ScopedPK11SymKey key(nss_test::ImportSymKey(slot.get(), CKM_HKDF_KEY_GEN,
+                                              PK11_OriginUnwrap, CKA_DERIVE,
+                                              &key_item, nullptr));
   ASSERT_TRUE(!!key);
   AddPsk(key, std::string(label), ssl_hash_sha256);
   client_->ExpectPsk(ssl_psk_none);
@@ -2381,6 +2589,41 @@ TEST_F(TlsConnectStreamTls13, NoEchFromTls12Client) {
   ASSERT_FALSE(filter->captured());
 }
 
+TEST_F(TlsConnectStreamTls13Ech, CorrectPreLimInfoFromTls12ClientWithEch) {
+  EnsureTlsSetup();
+  SetupEch(client_, server_);
+  client_->SetVersionRange(SSL_LIBRARY_VERSION_TLS_1_2,
+                           SSL_LIBRARY_VERSION_TLS_1_2);
+  server_->SetVersionRange(SSL_LIBRARY_VERSION_TLS_1_2,
+                           SSL_LIBRARY_VERSION_TLS_1_3);
+  client_->ExpectEch(false);
+  server_->ExpectEch(false);
+  SetExpectedVersion(SSL_LIBRARY_VERSION_TLS_1_2);
+  Connect();
+  SSLPreliminaryChannelInfo channelPreInfo;
+  SSL_GetPreliminaryChannelInfo(server_->ssl_fd(), &channelPreInfo,
+                                sizeof(channelPreInfo));
+  EXPECT_EQ(PR_FALSE, channelPreInfo.echAccepted);
+  EXPECT_EQ(NULL, channelPreInfo.echPublicName);
+}
+
+TEST_F(TlsConnectStreamTls13Ech, CorrectSNIFromTls12ClientWithEch) {
+  EnsureTlsSetup();
+  SetupEch(client_, server_);
+  client_->SetVersionRange(SSL_LIBRARY_VERSION_TLS_1_2,
+                           SSL_LIBRARY_VERSION_TLS_1_2);
+  server_->SetVersionRange(SSL_LIBRARY_VERSION_TLS_1_2,
+                           SSL_LIBRARY_VERSION_TLS_1_3);
+  client_->ExpectEch(false);
+  server_->ExpectEch(false);
+  SetExpectedVersion(SSL_LIBRARY_VERSION_TLS_1_2);
+  auto filter =
+      MakeTlsFilter<TlsExtensionCapture>(client_, ssl_server_name_xtn);
+  Connect();
+  ASSERT_TRUE(filter->captured());
+  CheckSniExtension(filter->extension(), "server");
+}
+
 TEST_F(TlsConnectStreamTls13, EchOuterWith12Max) {
   EnsureTlsSetup();
   SetupEch(client_, server_);
@@ -2487,6 +2730,26 @@ TEST_F(TlsConnectStreamTls13Ech, EchCustomExtensionWriter) {
   client_->ExpectEch();
   server_->ExpectEch();
   Connect();
+}
+
+TEST_F(TlsConnectStreamTls13, EchCustomExtensionWriterZeroRtt) {
+  EnsureTlsSetup();
+  SetupEch(client_, server_);
+  SetupForZeroRtt();
+
+  client_->Set0RttEnabled(true);
+  server_->Set0RttEnabled(true);
+  ASSERT_EQ(SECSuccess, SSL_InstallExtensionHooks(
+                            client_->ssl_fd(), 62028, EmptyExtensionWriter,
+                            nullptr, NoopExtensionHandler, nullptr));
+  SetupEch(client_, server_);
+  ExpectResumption(RESUME_TICKET);
+
+  ZeroRttSendReceive(true, true);
+  Handshake();
+  ExpectEarlyDataAccepted(true);
+  CheckConnected();
+  SendReceive();
 }
 
 TEST_F(TlsConnectStreamTls13Ech, EchCustomExtensionWriterOuterOnly) {
@@ -2879,7 +3142,7 @@ TEST_F(TlsConnectStreamTls13Ech, EchPublicNameNotLdh) {
       "name-",
       "test-.name",
       "!",
-      u8"\u2077",
+      "\xe2\x81\xb7",  // U+2077 SUPERSCRIPT SEVEN, UTF-8 encoded
   };
   ValidatePublicNames(kNotLdh, SECFailure);
 }
@@ -2904,6 +3167,102 @@ TEST_F(TlsConnectStreamTls13, EchGreaseClientHelloExtensionPermutation) {
   ASSERT_TRUE(SSL_EnableTls13GreaseEch(client_->ssl_fd(), PR_FALSE) ==
               SECSuccess);
   Connect();
+}
+
+TEST_F(TlsConnectDatagram13, EchNoSupportDTLS) {
+  EnsureTlsSetup();
+  DataBuffer echconfig;
+  ScopedSECKEYPublicKey pub;
+  ScopedSECKEYPrivateKey priv;
+  TlsConnectTestBase::GenerateEchConfig(HpkeDhKemX25519Sha256,
+                                        kUnknownFirstSuite, kPublicName, 100,
+                                        echconfig, pub, priv);
+  ASSERT_EQ(SECFailure,
+            SSL_SetClientEchConfigs(client_->ssl_fd(), echconfig.data(),
+                                    echconfig.len()));
+  ASSERT_EQ(SECFailure,
+            SSL_SetServerEchConfigs(server_->ssl_fd(), pub.get(), priv.get(),
+                                    echconfig.data(), echconfig.len()));
+
+  client_->ExpectEch(false);
+  server_->ExpectEch(false);
+  Connect();
+}
+
+// Accept ECH across a HelloRetryRequest on a single, stateful server socket
+// (no MakeNewServer() reset). ECH is accepted twice on the same socket, which
+// exercises the server's cleanup of per-ClientHello ECH state between the two
+// ClientHellos.
+TEST_F(TlsConnectStreamTls13, EchAcceptWithHrrSameServer) {
+  SKIP_ECH_HRR_IN_FIPS();
+  ScopedSECKEYPublicKey pub;
+  ScopedSECKEYPrivateKey priv;
+  DataBuffer echconfig;
+  ConfigureSelfEncrypt();
+  EnsureTlsSetup();
+  TlsConnectTestBase::GenerateEchConfig(HpkeDhKemX25519Sha256, kDefaultSuites,
+                                        kPublicName, 100, echconfig, pub, priv);
+  ASSERT_EQ(SECSuccess,
+            SSL_SetServerEchConfigs(server_->ssl_fd(), pub.get(), priv.get(),
+                                    echconfig.data(), echconfig.len()));
+  ASSERT_EQ(SECSuccess,
+            SSL_SetClientEchConfigs(client_->ssl_fd(), echconfig.data(),
+                                    echconfig.len()));
+  client_->ExpectEch();
+  server_->ExpectEch();
+
+  size_t cb_called = 0;
+  EXPECT_EQ(SECSuccess, SSL_HelloRetryRequestCallback(
+                            server_->ssl_fd(), RetryEchHello, &cb_called));
+
+  auto server_hrr_ech_xtn = MakeTlsFilter<TlsExtensionCapture>(
+      server_, ssl_tls13_encrypted_client_hello_xtn);
+  // Drive both ClientHellos against the same server socket.
+  client_->StartConnect();
+  server_->StartConnect();
+  Handshake();
+  ASSERT_TRUE(server_hrr_ech_xtn->captured());
+  // Same socket, so the callback fires for both ClientHellos: request on CH1,
+  // accept on CH2 (contrast EchAcceptWithHrr, where MakeNewServer() drops the
+  // callback before CH2).
+  EXPECT_EQ(2U, cb_called);
+  CheckConnected();
+  SendReceive();
+}
+
+TEST_F(TlsConnectStreamTls13, EchAcceptWithHrrSameServerUncompressed) {
+  SKIP_ECH_HRR_IN_FIPS();
+  ScopedSECKEYPublicKey pub;
+  ScopedSECKEYPrivateKey priv;
+  DataBuffer echconfig;
+  ConfigureSelfEncrypt();
+  EnsureTlsSetup();
+  TlsConnectTestBase::GenerateEchConfig(HpkeDhKemX25519Sha256, kDefaultSuites,
+                                        kPublicName, 100, echconfig, pub, priv);
+  ASSERT_EQ(SECSuccess,
+            SSL_SetServerEchConfigs(server_->ssl_fd(), pub.get(), priv.get(),
+                                    echconfig.data(), echconfig.len()));
+  ASSERT_EQ(SECSuccess,
+            SSL_SetClientEchConfigs(client_->ssl_fd(), echconfig.data(),
+                                    echconfig.len()));
+  ASSERT_EQ(SECSuccess,
+            SSLInt_SetEnableEchXtnCompression(client_->ssl_fd(), PR_FALSE));
+  client_->ExpectEch();
+  server_->ExpectEch();
+
+  size_t cb_called = 0;
+  EXPECT_EQ(SECSuccess, SSL_HelloRetryRequestCallback(
+                            server_->ssl_fd(), RetryEchHello, &cb_called));
+
+  auto server_hrr_ech_xtn = MakeTlsFilter<TlsExtensionCapture>(
+      server_, ssl_tls13_encrypted_client_hello_xtn);
+  client_->StartConnect();
+  server_->StartConnect();
+  Handshake();
+  ASSERT_TRUE(server_hrr_ech_xtn->captured());
+  EXPECT_EQ(2U, cb_called);
+  CheckConnected();
+  SendReceive();
 }
 
 INSTANTIATE_TEST_SUITE_P(EchAgentTest, TlsAgentEchTest,

@@ -53,6 +53,7 @@ SECStatus sslBuffer_InsertLength(sslBuffer *b, unsigned int at,
 SECStatus sslBuffer_InsertNumber(sslBuffer *b, unsigned int at,
                                  PRUint64 v, unsigned int size);
 void sslBuffer_Clear(sslBuffer *b);
+void sslBuffer_ZeroClear(sslBuffer *b);
 
 SECStatus ssl3_AppendHandshake(sslSocket *ss, const void *void_src,
                                unsigned int bytes);
@@ -60,13 +61,18 @@ SECStatus ssl3_AppendHandshakeSuppressHash(sslSocket *ss, const void *void_src,
                                            unsigned int bytes);
 SECStatus ssl3_AppendHandshakeHeader(sslSocket *ss,
                                      SSLHandshakeType t, unsigned int length);
+SECStatus ssl3_AppendHandshakeHeaderAndStashSeqNum(sslSocket *ss,
+                                                   SSLHandshakeType t, unsigned int length, PRUint64 *b);
 SECStatus ssl3_AppendHandshakeNumber(sslSocket *ss, PRUint64 num,
                                      unsigned int lenSize);
+SECStatus ssl3_AppendHandshakeNumberSuppressHash(sslSocket *ss, PRUint64 num,
+                                                 unsigned int lenSize, PRBool suppressHash);
 SECStatus ssl3_AppendHandshakeVariable(sslSocket *ss, const PRUint8 *src,
                                        unsigned int bytes, unsigned int lenSize);
 SECStatus ssl3_AppendBufferToHandshake(sslSocket *ss, sslBuffer *buf);
 SECStatus ssl3_AppendBufferToHandshakeVariable(sslSocket *ss, sslBuffer *buf,
                                                unsigned int lenSize);
+SECStatus ssl3_CopyToSECItem(sslBuffer *b, SECItem *i);
 
 typedef struct {
     const PRUint8 *buf;
@@ -90,5 +96,9 @@ SECStatus sslRead_ReadVariable(sslReader *reader, unsigned int sizeLen,
                                sslReadBuffer *out);
 SECStatus sslRead_ReadNumber(sslReader *reader, unsigned int bytes,
                              PRUint64 *val);
+
+/* Remove message_seq, fragment_offset and fragment_length values
+ * from the savedMessage buffer. Used for DTLS1.3 */
+SECStatus ssl3_MaybeUpdateHashWithSavedRecord(sslSocket *ss);
 
 #endif /* __sslencode_h_ */

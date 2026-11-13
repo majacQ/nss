@@ -7,7 +7,7 @@
 #ifndef _PKCS11I_H_
 #define _PKCS11I_H_ 1
 
-#include "nssilock.h"
+#include "prlock.h"
 #include "seccomon.h"
 #include "secoidt.h"
 #include "lowkeyti.h"
@@ -70,28 +70,30 @@
 #define TIME_SESSION_HASH_SIZE 1024
 #define MAX_OBJECT_LIST_SIZE 800
 /* how many objects to keep on the free list
-                   * before we start freeing them */
+ * before we start freeing them */
 #define MAX_KEY_LEN 256 /* maximum symmetric key length in bytes */
 
 /*
- * LOG2_BUCKETS_PER_SESSION_LOCK must be a prime number.
- * With SESSION_HASH_SIZE=1024, LOG2 can be 9, 5, 1, or 0.
- * With SESSION_HASH_SIZE=4096, LOG2 can be 11, 9, 5, 1, or 0.
+ * LOG2_BUCKETS_PER_SESSION_LOCK selects how many adjacent head buckets
+ * share a single lock. Valid values are in [0, log2(SESSION_HASH_SIZE)].
  *
- * HASH_SIZE   LOG2_BUCKETS_PER   BUCKETS_PER_LOCK  NUMBER_OF_BUCKETS
- * 1024        9                  512               2
- * 1024        5                  32                32
- * 1024        1                  2                 512
- * 1024        0                  1                 1024
- * 4096        11                 2048              2
- * 4096        9                  512               8
- * 4096        5                  32                128
- * 4096        1                  2                 2048
- * 4096        0                  1                 4096
+ * LOG2=0 gives one lock per bucket: no coincidental contention between
+ * unrelated handles at the cost of more PRLocks per slot. Larger values
+ * trade lock count for contention between sessions whose handles hash
+ * into the same lock group.
+ *
+ * HASH_SIZE   LOG2   BUCKETS_PER_LOCK   NUMBER_OF_LOCKS
+ * 32          0      1                  32
+ * 32          1      2                  16
+ * 32          2      4                  8
+ * 32          3      8                  4
+ * 1024        0      1                  1024
+ * 1024        1      2                  512
+ * 1024        5      32                 32
+ * 1024        9      512                2
  */
-#define LOG2_BUCKETS_PER_SESSION_LOCK 1
+#define LOG2_BUCKETS_PER_SESSION_LOCK 0
 #define BUCKETS_PER_SESSION_LOCK (1 << (LOG2_BUCKETS_PER_SESSION_LOCK))
-/* NOSPREAD sessionID to hash table index macro has been slower. */
 
 /* define typedefs, double as forward declarations as well */
 typedef struct SFTKAttributeStr SFTKAttribute;
@@ -118,14 +120,14 @@ typedef struct SFTKItemTemplateStr SFTKItemTemplate;
 /* define function pointer typdefs for pointer tables */
 typedef void (*SFTKDestroy)(void *, PRBool);
 typedef void (*SFTKBegin)(void *);
-typedef SECStatus (*SFTKCipher)(void *, void *, unsigned int *, unsigned int,
-                                void *, unsigned int);
+typedef SECStatus (*SFTKCipher)(void *, unsigned char *, unsigned int *, unsigned int,
+                                const unsigned char *, unsigned int);
 typedef SECStatus (*SFTKAEADCipher)(void *, void *, unsigned int *,
                                     unsigned int, void *, unsigned int,
                                     void *, unsigned int, void *, unsigned int);
-typedef SECStatus (*SFTKVerify)(void *, void *, unsigned int, void *, unsigned int);
-typedef void (*SFTKHash)(void *, const void *, unsigned int);
-typedef void (*SFTKEnd)(void *, void *, unsigned int *, unsigned int);
+typedef SECStatus (*SFTKVerify)(void *, const unsigned char *, unsigned int, const unsigned char *, unsigned int);
+typedef void (*SFTKHash)(void *, const unsigned char *, unsigned int);
+typedef void (*SFTKEnd)(void *, unsigned char *, unsigned int *, unsigned int);
 typedef void (*SFTKFree)(void *);
 
 /* Value to tell if an attribute is modifiable or not.
@@ -152,6 +154,16 @@ typedef enum {
 } SFTKFreeStatus;
 
 /*
+ * Source of various objects
+ */
+typedef enum {
+    SFTK_SOURCE_DEFAULT = 0,
+    SFTK_SOURCE_KEA,
+    SFTK_SOURCE_HKDF_EXPAND,
+    SFTK_SOURCE_HKDF_EXTRACT
+} SFTKSource;
+
+/*
  * attribute values of an object.
  */
 struct SFTKAttributeStr {
@@ -176,7 +188,7 @@ struct SFTKObjectListStr {
 
 struct SFTKObjectFreeListStr {
     SFTKObject *head;
-    PZLock *lock;
+    PRLock *lock;
     int count;
 };
 
@@ -189,11 +201,14 @@ struct SFTKObjectStr {
     CK_OBJECT_CLASS objclass;
     CK_OBJECT_HANDLE handle;
     int refCount;
-    PZLock *refLock;
+    PRUint32 type; /* SFTK_SESSION_OBJECT_TYPE or SFTK_TOKEN_OBJECT_TYPE */
+    PRLock *refLock;
     SFTKSlot *slot;
     void *objectInfo;
     SFTKFree infoFree;
-    PRBool isFIPS;
+    CK_FLAGS validation_value;
+    SFTKAttribute validation_attribute;
+    SFTKSource source;
 };
 
 struct SFTKTokenObjectStr {
@@ -204,7 +219,7 @@ struct SFTKTokenObjectStr {
 struct SFTKSessionObjectStr {
     SFTKObject obj;
     SFTKObjectList sessionList;
-    PZLock *attributeLock;
+    PRLock *attributeLock;
     SFTKSession *session;
     PRBool wasDerived;
     int nextAttr;
@@ -292,6 +307,7 @@ struct SFTKSessionContextStr {
     SFTKVerify verify;
     unsigned int maxLen;
     SFTKObject *key;
+    SECItem *signature;
 };
 
 /*
@@ -301,7 +317,7 @@ struct SFTKSessionStr {
     SFTKSession *next;
     SFTKSession *prev;
     CK_SESSION_HANDLE handle;
-    PZLock *objectLock;
+    int refCount; /* protected by SFTK_SESSION_LOCK(slot, handle) */
     int objectIDCount;
     CK_SESSION_INFO info;
     CK_NOTIFY notify;
@@ -310,8 +326,8 @@ struct SFTKSessionStr {
     SFTKSearchResults *search;
     SFTKSessionContext *enc_context;
     SFTKSessionContext *hash_context;
-    SFTKSessionContext *sign_context;
     PRBool lastOpWasFIPS;
+    /* protected by slot->objectLock, see below */
     SFTKObjectList *objects[1];
 };
 
@@ -321,11 +337,23 @@ struct SFTKSessionStr {
  * The array of sessionLock's protect the session hash table (head[])
  * as well as the reference count of session objects in that bucket
  * (head[]->refCount),  objectLock protects all elements of the slot's
- * object hash tables (sessObjHashTable[] and tokObjHashTable), and
- * sessionObjectHandleCount.
- * slotLock protects the remaining protected elements:
- * password, needLogin, isLoggedIn, ssoLoggedIn, and sessionCount,
- * and pwCheckLock serializes the key database password checks in
+ * object hash tables (sessObjHashTable[] and tokObjHashTable),
+ * sessionObjectHandleCount, and the per-session object lists
+ * (SFTKSession.objects[] and SFTKSessionObject.sessionList/session) of
+ * every session on this slot.
+ *
+ * The per-session object lists deliberately do NOT have a per-session lock.
+ * Object handles are slot-global, so sftk_DeleteObject() can be asked to
+ * unlink an object from a session other than the caller's, on which it holds
+ * no reference; a lock owned by that session could be destroyed underneath
+ * it (bug 2061391). Using the slot's lock -- which outlives every session on
+ * the slot -- also keeps the two queues atomic with respect to each other,
+ * giving the invariant that a session object is on its owning session's list
+ * if and only if it is in sessObjHashTable[].
+ *
+ * slotLock protects password, needLogin, isLoggedIn, ssoLoggedIn,
+ * sessionCount, and rwSessionCount.
+ * pwCheckLock serializes the key database password checks in
  * NSC_SetPIN and NSC_Login.
  *
  * Each of the fields below has the following lifetime as commented
@@ -343,11 +371,11 @@ struct SFTKSessionStr {
  */
 struct SFTKSlotStr {
     CK_SLOT_ID slotID;             /* invariant */
-    PZLock *slotLock;              /* invariant */
-    PZLock **sessionLock;          /* invariant */
+    PRLock *slotLock;              /* invariant */
+    PRLock **sessionLock;          /* invariant */
     unsigned int numSessionLocks;  /* invariant */
     unsigned long sessionLockMask; /* invariant */
-    PZLock *objectLock;            /* invariant */
+    PRLock *objectLock;            /* invariant */
     PRLock *pwCheckLock;           /* invariant */
     PRBool present;                /* variable -set */
     PRBool hasTokens;              /* per load */
@@ -365,8 +393,7 @@ struct SFTKSlotStr {
     int sessionIDConflict;         /* not protected by a lock */
                                    /* (preserved) */
     int sessionCount;              /* variable - reset */
-    PRInt32 rwSessionCount;        /* set by atomic operations */
-                                   /* (reset) */
+    int rwSessionCount;            /* variable - reset */
     int sessionObjectHandleCount;  /* variable - perserved */
     CK_ULONG index;                /* invariant */
     PLHashTable *tokObjHashTable;  /* invariant */
@@ -501,16 +528,26 @@ struct SFTKItemTemplateStr {
 
 /* slot helper macros */
 #define sftk_SlotFromSession(sp) ((sp)->slot)
-#define sftk_isToken(id) (((id)&SFTK_TOKEN_MASK) == SFTK_TOKEN_MAGIC)
+#define sftk_isToken(id) (((id) & SFTK_TOKEN_MASK) == SFTK_TOKEN_MAGIC)
+
+/* Type tag values for SFTKObject.type */
+#define SFTK_SESSION_OBJECT_TYPE 0xFFFFFFFFU
+#define SFTK_TOKEN_OBJECT_TYPE 0x00000000U
+
 #define sftk_isFIPS(id) \
     (((id) == FIPS_SLOT_ID) || ((id) >= SFTK_MIN_FIPS_USER_SLOT_ID))
+
+/* validation flags. These are token specific, but also
+ * visible to the application via the validation object
+ * each validation should cover a unique bit. */
+#define SFTK_VALIDATION_FIPS_FLAG 0x00000001L
 
 /* the session hash multiplier (see bug 201081) */
 #define SHMULTIPLIER 1791398085
 
 /* queueing helper macros */
 #define sftk_hash(value, size) \
-    ((PRUint32)((value)*SHMULTIPLIER) & (size - 1))
+    ((PRUint32)((value) * SHMULTIPLIER) & (size - 1))
 #define sftkqueue_add(element, id, head, hash_size) \
     {                                               \
         int tmp = sftk_hash(id, hash_size);         \
@@ -530,15 +567,27 @@ struct SFTKItemTemplateStr {
 #define sftkqueue_is_queued(element, id, head, hash_size) \
     (((element)->next) || ((element)->prev) ||            \
      ((head)[sftk_hash(id, hash_size)] == (element)))
-#define sftkqueue_delete(element, id, head, hash_size)        \
-    if ((element)->next)                                      \
-        (element)->next->prev = (element)->prev;              \
-    if ((element)->prev)                                      \
-        (element)->prev->next = (element)->next;              \
-    else                                                      \
-        (head)[sftk_hash(id, hash_size)] = ((element)->next); \
-    (element)->next = NULL;                                   \
-    (element)->prev = NULL;
+#define sftkqueue_check_links(element, bucket_head)                 \
+    do {                                                            \
+        PORT_ReleaseAssert(!(element)->next ||                      \
+                           (element)->next->prev == (element));     \
+        PORT_ReleaseAssert((element)->prev                          \
+                               ? (element)->prev->next == (element) \
+                               : (bucket_head) == (element));       \
+    } while (0)
+#define sftkqueue_delete(element, id, head, hash_size)       \
+    do {                                                     \
+        PRUint32 sftkq_index = sftk_hash(id, hash_size);     \
+        sftkqueue_check_links(element, (head)[sftkq_index]); \
+        if ((element)->next)                                 \
+            (element)->next->prev = (element)->prev;         \
+        if ((element)->prev)                                 \
+            (element)->prev->next = (element)->next;         \
+        else                                                 \
+            (head)[sftkq_index] = ((element)->next);         \
+        (element)->next = NULL;                              \
+        (element)->prev = NULL;                              \
+    } while (0)
 
 #define sftkqueue_init_element(element) \
     (element)->prev = NULL;
@@ -560,28 +609,34 @@ struct SFTKItemTemplateStr {
         }                                         \
     }
 
-#define sftkqueue_delete2(element, id, index, head) \
-    if ((element)->next)                            \
-        (element)->next->prev = (element)->prev;    \
-    if ((element)->prev)                            \
-        (element)->prev->next = (element)->next;    \
-    else                                            \
-        (head)[index] = ((element)->next);
+#define sftkqueue_delete2(element, id, index, head)    \
+    do {                                               \
+        sftkqueue_check_links(element, (head)[index]); \
+        if ((element)->next)                           \
+            (element)->next->prev = (element)->prev;   \
+        if ((element)->prev)                           \
+            (element)->prev->next = (element)->next;   \
+        else                                           \
+            (head)[index] = ((element)->next);         \
+    } while (0)
 
 #define sftkqueue_clear_deleted_element(element) \
     (element)->next = NULL;                      \
     (element)->prev = NULL;
 
-/* sessionID (handle) is used to determine session lock bucket */
-#ifdef NOSPREAD
-/* NOSPREAD:    (ID>>L2LPB) & (perbucket-1) */
+/* The session lock for a head bucket protects every session linked into
+ * that bucket as well as the head pointer itself. Each lock covers
+ * BUCKETS_PER_SESSION_LOCK adjacent head buckets.
+ *
+ * Both forms below derive the lock from the head-bucket index, so that
+ * SFTK_SESSION_LOCK(slot, handle) and SFTK_HEAD_BUCKET_LOCK(slot,
+ * sftk_hash(handle, sessHashSize)) name the same lock. Walkers like
+ * sftk_CloseAllSessions and sftk_update_all_states iterate by bucket
+ * index, so they must use SFTK_HEAD_BUCKET_LOCK directly. */
+#define SFTK_HEAD_BUCKET_LOCK(slot, bucket) \
+    ((slot)->sessionLock[((bucket) >> LOG2_BUCKETS_PER_SESSION_LOCK) & (slot)->sessionLockMask])
 #define SFTK_SESSION_LOCK(slot, handle) \
-    ((slot)->sessionLock[((handle) >> LOG2_BUCKETS_PER_SESSION_LOCK) & (slot)->sessionLockMask])
-#else
-/* SPREAD:  ID & (perbucket-1) */
-#define SFTK_SESSION_LOCK(slot, handle) \
-    ((slot)->sessionLock[(handle) & (slot)->sessionLockMask])
-#endif
+    SFTK_HEAD_BUCKET_LOCK(slot, sftk_hash((handle), (slot)->sessHashSize))
 
 /* expand an attribute & secitem structures out */
 #define sftk_attr_expand(ap) (ap)->type, (ap)->pValue, (ap)->ulValueLen
@@ -658,7 +713,7 @@ struct sftk_MACCtxStr {
      *        context, checking the return code.
      *      - sftk_MAC_Update(...) as many times as necessary to process
      *        input data, checking the return code.
-     *      - sftk_MAC_Finish(...) to get the output of the MAC; result_len
+     *      - sftk_MAC_End(...) to get the output of the MAC; result_len
      *        may be NULL if the caller knows the expected output length,
      *        checking the return code. If result_len is NULL, this will
      *        PR_ASSERT(...) that the actual returned length was equal to
@@ -670,7 +725,7 @@ struct sftk_MACCtxStr {
      *        stack allocation of size SFTK_MAX_MAC_LENGTH.
      *      - sftk_MAC_Reset(...) if the caller wishes to compute a new MAC
      *        with the same key, checking the return code.
-     *      - sftk_MAC_Destroy(...) when the caller frees its associated
+     *      - sftk_MAC_DestroyContext(...) when the caller frees its associated
      *        memory, passing PR_TRUE if sftk_MAC_Create(...) was called,
      *        and PR_FALSE otherwise.
      */
@@ -686,7 +741,7 @@ struct sftk_MACCtxStr {
          *
          *  - sftk_MAC_Init
          *  - sftk_MAC_Update
-         *  - sftk_MAC_Finish
+         *  - sftk_MAC_End
          *  - sftk_MAC_Reset
          */
         void *raw;
@@ -754,10 +809,11 @@ extern CK_RV sftk_Attribute2SSecItem(PLArenaPool *arena, SECItem *item,
 extern SFTKModifyType sftk_modifyType(CK_ATTRIBUTE_TYPE type,
                                       CK_OBJECT_CLASS inClass);
 extern PRBool sftk_isSensitive(CK_ATTRIBUTE_TYPE type, CK_OBJECT_CLASS inClass);
-extern char *sftk_getString(SFTKObject *object, CK_ATTRIBUTE_TYPE type);
-extern void sftk_nullAttribute(SFTKObject *object, CK_ATTRIBUTE_TYPE type);
 extern CK_RV sftk_GetULongAttribute(SFTKObject *object, CK_ATTRIBUTE_TYPE type,
                                     CK_ULONG *longData);
+extern CK_RV sftk_ReadAttribute(SFTKObject *object, CK_ATTRIBUTE_TYPE type,
+                                unsigned char *data, unsigned int maxlen,
+                                unsigned int *lenp);
 extern CK_RV sftk_forceAttribute(SFTKObject *object, CK_ATTRIBUTE_TYPE type,
                                  const void *value, unsigned int len);
 extern CK_RV sftk_defaultAttribute(SFTKObject *object, CK_ATTRIBUTE_TYPE type,
@@ -772,7 +828,6 @@ extern void sftk_ReferenceObject(SFTKObject *object);
 extern SFTKObject *sftk_ObjectFromHandle(CK_OBJECT_HANDLE handle,
                                          SFTKSession *session);
 extern CK_OBJECT_HANDLE sftk_getNextHandle(SFTKSlot *slot);
-extern void sftk_AddSlotObject(SFTKSlot *slot, SFTKObject *object);
 extern void sftk_AddObject(SFTKSession *session, SFTKObject *object);
 /* clear out all the existing object ID to database key mappings.
  * used to reinit a token */
@@ -780,7 +835,7 @@ extern CK_RV SFTK_ClearTokenKeyHashTable(SFTKSlot *slot);
 
 extern CK_RV sftk_searchObjectList(SFTKSearchResults *search,
                                    SFTKObject **head, unsigned int size,
-                                   PZLock *lock, CK_ATTRIBUTE_PTR inTemplate,
+                                   PRLock *lock, CK_ATTRIBUTE_PTR inTemplate,
                                    int count, PRBool isLoggedIn);
 extern SFTKObjectListElement *sftk_FreeObjectListElement(
     SFTKObjectListElement *objectList);
@@ -794,7 +849,6 @@ extern CK_SLOT_ID sftk_SlotIDFromSessionHandle(CK_SESSION_HANDLE handle);
 extern SFTKSession *sftk_SessionFromHandle(CK_SESSION_HANDLE handle);
 extern void sftk_FreeSession(SFTKSession *session);
 extern void sftk_ClearSession(SFTKSession *session);
-extern void sftk_DestroySession(SFTKSession *session);
 extern CK_RV sftk_InitSession(SFTKSession *session, SFTKSlot *slot,
                               CK_SLOT_ID slotID, CK_NOTIFY notify,
                               CK_VOID_PTR pApplication, CK_FLAGS flags);
@@ -817,12 +871,14 @@ extern CK_RV sftk_InitGeneric(SFTKSession *session,
                               CK_ATTRIBUTE_TYPE operation);
 void sftk_SetContextByType(SFTKSession *session, SFTKContextType type,
                            SFTKSessionContext *context);
+extern CK_RV sftk_InstallContext(SFTKSession *session, SFTKContextType type,
+                                 SFTKSessionContext *context);
+extern void sftk_UninstallContext(SFTKSession *session, SFTKContextType type);
 extern CK_RV sftk_GetContext(CK_SESSION_HANDLE handle,
                              SFTKSessionContext **contextPtr,
                              SFTKContextType type, PRBool needMulti,
                              SFTKSession **sessionPtr);
-extern void sftk_TerminateOp(SFTKSession *session, SFTKContextType ctype,
-                             SFTKSessionContext *context);
+extern void sftk_TerminateOp(SFTKSession *session, SFTKContextType ctype);
 extern void sftk_FreeContext(SFTKSessionContext *context);
 
 extern NSSLOWKEYPublicKey *sftk_GetPubKey(SFTKObject *object,
@@ -840,19 +896,19 @@ extern void sftk_EncodeInteger(PRUint64 integer, CK_ULONG num_bits, CK_BBOOL lit
 /* ike and xcbc helpers */
 extern CK_RV sftk_ike_prf(CK_SESSION_HANDLE hSession,
                           const SFTKAttribute *inKey,
-                          const CK_NSS_IKE_PRF_DERIVE_PARAMS *params, SFTKObject *outKey);
+                          const CK_IKE_PRF_DERIVE_PARAMS *params, SFTKObject *outKey);
 extern CK_RV sftk_ike1_prf(CK_SESSION_HANDLE hSession,
                            const SFTKAttribute *inKey,
-                           const CK_NSS_IKE1_PRF_DERIVE_PARAMS *params, SFTKObject *outKey,
+                           const CK_IKE1_PRF_DERIVE_PARAMS *params, SFTKObject *outKey,
                            unsigned int keySize);
 extern CK_RV sftk_ike1_appendix_b_prf(CK_SESSION_HANDLE hSession,
                                       const SFTKAttribute *inKey,
-                                      const CK_NSS_IKE1_APP_B_PRF_DERIVE_PARAMS *params,
+                                      const CK_IKE1_EXTENDED_DERIVE_PARAMS *params,
                                       SFTKObject *outKey,
                                       unsigned int keySize);
 extern CK_RV sftk_ike_prf_plus(CK_SESSION_HANDLE hSession,
                                const SFTKAttribute *inKey,
-                               const CK_NSS_IKE_PRF_PLUS_DERIVE_PARAMS *params, SFTKObject *outKey,
+                               const CK_IKE2_PRF_PLUS_DERIVE_PARAMS *params, SFTKObject *outKey,
                                unsigned int keySize);
 extern CK_RV sftk_aes_xcbc_new_keys(CK_SESSION_HANDLE hSession,
                                     CK_OBJECT_HANDLE hKey, CK_OBJECT_HANDLE_PTR phKey,
@@ -890,7 +946,7 @@ PRBool sftk_poisonHandle(SFTKSlot *slot, SECItem *dbkey,
                          CK_OBJECT_HANDLE handle);
 SFTKObject *sftk_NewTokenObject(SFTKSlot *slot, SECItem *dbKey,
                                 CK_OBJECT_HANDLE handle);
-SFTKTokenObject *sftk_convertSessionToToken(SFTKObject *so);
+CK_RV sftk_convertSessionToToken(SFTKObject *so);
 
 /* J-PAKE (jpakesftk.c) */
 extern CK_RV jpake_Round1(HASH_HashType hashType,
@@ -908,10 +964,10 @@ sftk_MACConstantTimeCtx *sftk_HMACConstantTime_New(
     CK_MECHANISM_PTR mech, SFTKObject *key);
 sftk_MACConstantTimeCtx *sftk_SSLv3MACConstantTime_New(
     CK_MECHANISM_PTR mech, SFTKObject *key);
-void sftk_HMACConstantTime_Update(void *pctx, const void *data, unsigned int len);
-void sftk_SSLv3MACConstantTime_Update(void *pctx, const void *data, unsigned int len);
+void sftk_HMACConstantTime_Update(void *pctx, const unsigned char *data, unsigned int len);
+void sftk_SSLv3MACConstantTime_Update(void *pctx, const unsigned char *data, unsigned int len);
 void sftk_MACConstantTime_EndHash(
-    void *pctx, void *out, unsigned int *outLength, unsigned int maxLength);
+    void *pctx, unsigned char *out, unsigned int *outLength, unsigned int maxLength);
 void sftk_MACConstantTime_DestroyContext(void *pctx, PRBool);
 
 /* Crypto Utilities */
@@ -935,9 +991,9 @@ CK_RV sftk_MAC_Create(CK_MECHANISM_TYPE mech, SFTKObject *key, sftk_MACCtx **ret
 CK_RV sftk_MAC_Init(sftk_MACCtx *ctx, CK_MECHANISM_TYPE mech, SFTKObject *key);
 CK_RV sftk_MAC_InitRaw(sftk_MACCtx *ctx, CK_MECHANISM_TYPE mech, const unsigned char *key, unsigned int key_len, PRBool isFIPS);
 CK_RV sftk_MAC_Update(sftk_MACCtx *ctx, const CK_BYTE *data, unsigned int data_len);
-CK_RV sftk_MAC_Finish(sftk_MACCtx *ctx, CK_BYTE_PTR result, unsigned int *result_len, unsigned int max_result_len);
+CK_RV sftk_MAC_End(sftk_MACCtx *ctx, CK_BYTE_PTR result, unsigned int *result_len, unsigned int max_result_len);
 CK_RV sftk_MAC_Reset(sftk_MACCtx *ctx);
-void sftk_MAC_Destroy(sftk_MACCtx *ctx, PRBool free_it);
+void sftk_MAC_DestroyContext(sftk_MACCtx *ctx, PRBool free_it);
 
 /* constant time helpers */
 unsigned int sftk_CKRVToMask(CK_RV rv);
@@ -960,7 +1016,7 @@ char **NSC_ModuleDBFunc(unsigned long function, char *parameters, void *args);
 /* dh verify functions */
 /* verify that dhPrime matches one of our known primes, and if so return
  * it's subprime value */
-const SECItem *sftk_VerifyDH_Prime(SECItem *dhPrime, PRBool isFIPS);
+const SECItem *sftk_VerifyDH_Prime(SECItem *dhPrime, SECItem *generator, PRBool isFIPS);
 /* check if dhSubPrime claims dhPrime is a safe prime. */
 SECStatus sftk_IsSafePrime(SECItem *dhPrime, SECItem *dhSubPrime, PRBool *isSafe);
 /* map an operation Attribute to a Mechanism flag */
@@ -968,9 +1024,17 @@ CK_FLAGS sftk_AttributeToFlags(CK_ATTRIBUTE_TYPE op);
 /* check the FIPS table to determine if this current operation is allowed by
  * FIPS security policy */
 PRBool sftk_operationIsFIPS(SFTKSlot *slot, CK_MECHANISM *mech,
-                            CK_ATTRIBUTE_TYPE op, SFTKObject *source);
+                            CK_ATTRIBUTE_TYPE op, SFTKObject *source,
+                            CK_ULONG targetKeySize);
+/* manage the fips flag on objects */
+void sftk_setFIPS(SFTKObject *obj, PRBool isFIPS);
+PRBool sftk_hasFIPS(SFTKObject *obj);
+
 /* add validation objects to the slot */
 CK_RV sftk_CreateValidationObjects(SFTKSlot *slot);
+
+/* get the length of an MLDSASignature based on the PKCS #11 parameter set */
+unsigned int sftk_MLDSAGetSigLen(CK_ML_DSA_PARAMETER_SET_TYPE paramSet);
 
 SEC_END_PROTOS
 

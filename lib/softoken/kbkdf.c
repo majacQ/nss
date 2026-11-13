@@ -264,6 +264,29 @@ failure:
     return CKR_MECHANISM_PARAM_INVALID;
 }
 
+static PRBool
+kbkdf_ValidPRF(CK_SP800_108_PRF_TYPE prf)
+{
+    // See Table 161 of PKCS#11 v3.0 or Table 192 of PKCS#11 v3.1.
+    switch (prf) {
+        case CKM_AES_CMAC:
+            /* case CKM_DES3_CMAC: */
+            return PR_TRUE;
+        case CKM_SHA_1_HMAC:
+        case CKM_SHA224_HMAC:
+        case CKM_SHA256_HMAC:
+        case CKM_SHA384_HMAC:
+        case CKM_SHA512_HMAC:
+        case CKM_SHA3_224_HMAC:
+        case CKM_SHA3_256_HMAC:
+        case CKM_SHA3_384_HMAC:
+        case CKM_SHA3_512_HMAC:
+            /* Valid HMAC <-> HASH isn't NULL */
+            return sftk_HMACMechanismToHash(prf) != HASH_AlgNULL;
+    }
+    return PR_FALSE;
+}
+
 static CK_RV
 kbkdf_ValidateParameters(CK_MECHANISM_TYPE mech, const CK_SP800_108_KDF_PARAMS *params, CK_ULONG keySize)
 {
@@ -273,14 +296,7 @@ kbkdf_ValidateParameters(CK_MECHANISM_TYPE mech, const CK_SP800_108_KDF_PARAMS *
 
     /* Start with checking the prfType as a mechanism against a list of
      * PRFs allowed by PKCS#11 v3.0. */
-    if (!(/* The following types aren't defined in NSS yet. */
-          /* params->prfType != CKM_3DES_CMAC && */
-          params->prfType == CKM_AES_CMAC || /* allow */
-          /* We allow any HMAC except MD2 and MD5. */
-          params->prfType != CKM_MD2_HMAC ||                        /* disallow */
-          params->prfType != CKM_MD5_HMAC ||                        /* disallow */
-          sftk_HMACMechanismToHash(params->prfType) != HASH_AlgNULL /* Valid HMAC <-> HASH isn't NULL */
-          )) {
+    if (!kbkdf_ValidPRF(params->prfType)) {
         return CKR_MECHANISM_PARAM_INVALID;
     }
 
@@ -355,10 +371,28 @@ kbkdf_FindParameter(const CK_SP800_108_KDF_PARAMS *params, CK_PRF_DATA_TYPE type
     return NULL;
 }
 
-size_t
-kbkdf_IncrementBuffer(size_t cur_offset, size_t consumed, size_t prf_length)
+/* Compute *cur_offset += PR_ROUNDUP(consumed, prf_length) with overflow
+ * detection. Returns CKR_KEY_SIZE_RANGE if the result would not fit in
+ * size_t -- otherwise kbkdf_CalculateLength would allocate an undersized
+ * buffer and kbkdf_SaveKeys would memcpy past its end. */
+static CK_RV
+kbkdf_IncrementBuffer(size_t *cur_offset, size_t consumed, size_t prf_length)
 {
-    return cur_offset + PR_ROUNDUP(consumed, prf_length);
+    size_t rounded;
+
+    if (prf_length == 0) {
+        return CKR_KEY_SIZE_RANGE;
+    }
+    /* PR_ROUNDUP(x, m) = ((x + m - 1) / m) * m; reject if x + m - 1 overflows. */
+    if (consumed > SIZE_MAX - (prf_length - 1)) {
+        return CKR_KEY_SIZE_RANGE;
+    }
+    rounded = PR_ROUNDUP(consumed, prf_length);
+    if (*cur_offset > SIZE_MAX - rounded) {
+        return CKR_KEY_SIZE_RANGE;
+    }
+    *cur_offset += rounded;
+    return CKR_OK;
 }
 
 CK_ULONG
@@ -407,6 +441,8 @@ kbkdf_CalculateLength(const CK_SP800_108_KDF_PARAMS *params, sftk_MACCtx *ctx, C
      * bits. However, *buffer_length is in bytes.
      */
 
+    *buffer_length = 0;
+
     if (params->ulAdditionalDerivedKeys == 0) {
         /* When we have no additional derived keys, we get the keySize from
          * the value passed to one of our KBKDF_* methods. */
@@ -428,21 +464,30 @@ kbkdf_CalculateLength(const CK_SP800_108_KDF_PARAMS *params, sftk_MACCtx *ctx, C
 
         /* Count the initial derived key. */
         *output_bitlen = ret_key_size;
-        *buffer_length = kbkdf_IncrementBuffer(0, ret_key_size, ctx->mac_size);
+        if (kbkdf_IncrementBuffer(buffer_length, ret_key_size,
+                                  ctx->mac_size) != CKR_OK) {
+            return CKR_KEY_SIZE_RANGE;
+        }
 
         /* Handle n - 1 keys. The last key is special. */
         for (; offset < params->ulAdditionalDerivedKeys - 1; offset++) {
             derived_size = kbkdf_GetDerivedKeySize(params->pAdditionalDerivedKeys + offset);
 
             *output_bitlen += derived_size;
-            *buffer_length = kbkdf_IncrementBuffer(*buffer_length, derived_size, ctx->mac_size);
+            if (kbkdf_IncrementBuffer(buffer_length, derived_size,
+                                      ctx->mac_size) != CKR_OK) {
+                return CKR_KEY_SIZE_RANGE;
+            }
         }
 
         /* Handle the last key. */
         derived_size = kbkdf_GetDerivedKeySize(params->pAdditionalDerivedKeys + offset);
 
         *output_bitlen += derived_size;
-        *buffer_length = kbkdf_IncrementBuffer(*buffer_length, derived_size, ctx->mac_size);
+        if (kbkdf_IncrementBuffer(buffer_length, derived_size,
+                                  ctx->mac_size) != CKR_OK) {
+            return CKR_KEY_SIZE_RANGE;
+        }
 
         /* Pointer to the DKM method parameter. Note that this implicit cast
          * is safe since we've assumed we've been validated by
@@ -705,8 +750,12 @@ kbkdf_SaveKeys(CK_MECHANISM_TYPE mech, CK_SESSION_HANDLE hSession, CK_SP800_108_
     }
 
     /* Then increment the offset based on PKCS#11 additional key guidelines:
-     * no two keys may share the key stream from the same PRF invocation. */
-    buffer_offset = kbkdf_IncrementBuffer(buffer_offset, ret_key_size, prf_length);
+     * no two keys may share the key stream from the same PRF invocation.
+     * Overflow here would be a bug in kbkdf_CalculateLength: the increments
+     * mirror those it performs on the same inputs. */
+    if (kbkdf_IncrementBuffer(&buffer_offset, ret_key_size, prf_length) != CKR_OK) {
+        return CKR_KEY_SIZE_RANGE;
+    }
 
     if (params->ulAdditionalDerivedKeys > 0) {
         /* Note that the following code is technically incorrect: PKCS#11 v3.0
@@ -738,7 +787,9 @@ kbkdf_SaveKeys(CK_MECHANISM_TYPE mech, CK_SESSION_HANDLE hSession, CK_SP800_108_
             }
 
             /* Handle the increment. */
-            buffer_offset = kbkdf_IncrementBuffer(buffer_offset, key_size, prf_length);
+            if (kbkdf_IncrementBuffer(&buffer_offset, key_size, prf_length) != CKR_OK) {
+                return CKR_KEY_SIZE_RANGE;
+            }
 
             /* Finalize this key. */
             ret = kbkdf_FinalizeKey(hSession, derived_key, key_obj);
@@ -819,7 +870,7 @@ kbkdf_CounterRaw(const CK_SP800_108_KDF_PARAMS *params, sftk_MACCtx *ctx, unsign
         }
 
         /* Finalize this iteration of the PRF. */
-        ret = sftk_MAC_Finish(ctx, ret_buffer + buffer_offset, NULL, block_size);
+        ret = sftk_MAC_End(ctx, ret_buffer + buffer_offset, NULL, block_size);
         if (ret != CKR_OK) {
             return ret;
         }
@@ -936,7 +987,7 @@ kbkdf_FeedbackRaw(const CK_SP800_108_KDF_PARAMS *params, const unsigned char *in
          * first save this to the chaining value so that we can reuse it
          * in the next iteration before copying the necessary length to
          * the output buffer. */
-        ret = sftk_MAC_Finish(ctx, chaining_value, NULL, chaining_length);
+        ret = sftk_MAC_End(ctx, chaining_value, NULL, chaining_length);
         if (ret != CKR_OK) {
             goto finish;
         }
@@ -1065,7 +1116,7 @@ kbkdf_PipelineRaw(const CK_SP800_108_KDF_PARAMS *params, sftk_MACCtx *ctx, unsig
 
         /* Save the PRF output to chaining_value for use in the second
          * pipeline. */
-        ret = sftk_MAC_Finish(ctx, chaining_value, NULL, chaining_length);
+        ret = sftk_MAC_End(ctx, chaining_value, NULL, chaining_length);
         if (ret != CKR_OK) {
             goto finish;
         }
@@ -1089,7 +1140,7 @@ kbkdf_PipelineRaw(const CK_SP800_108_KDF_PARAMS *params, sftk_MACCtx *ctx, unsig
         /* Finalize this iteration of the PRF directly to the output buffer.
          * Unlike Feedback mode, this pipeline doesn't influence the previous
          * stage. */
-        ret = sftk_MAC_Finish(ctx, ret_buffer + buffer_offset, NULL, block_size);
+        ret = sftk_MAC_End(ctx, ret_buffer + buffer_offset, NULL, block_size);
         if (ret != CKR_OK) {
             goto finish;
         }
@@ -1128,7 +1179,7 @@ kbkdf_RawDispatch(CK_MECHANISM_TYPE mech,
     CK_RV ret;
     /* Context for our underlying PRF function.
      *
-     * Zeroing context required unconditional call of sftk_MAC_Destroy.
+     * Zeroing context required unconditional call of sftk_MAC_DestroyContext.
      */
     sftk_MACCtx ctx = { 0 };
 
@@ -1227,7 +1278,7 @@ finish:
     PORT_ZFree(output_buffer, buffer_length);
 
     /* Free the PRF. This should handle clearing all sensitive information. */
-    sftk_MAC_Destroy(&ctx, PR_FALSE);
+    sftk_MAC_DestroyContext(&ctx, PR_FALSE);
     return ret;
 }
 
@@ -1512,6 +1563,7 @@ sftk_fips_SP800_108_PowerUpSelfTests(void)
             (output_buffer == NULL) ||
             (PORT_Memcmp(output_buffer, test->expected_key_bytes, buffer_length) != 0)) {
             PORT_ZFree(output_buffer, buffer_length);
+            PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
             return SECFailure;
         }
         PORT_ZFree(output_buffer, buffer_length);

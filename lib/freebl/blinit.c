@@ -17,7 +17,7 @@
 #include <intrin.h> /* for _xgetbv() */
 #endif
 
-#if defined(_WIN64) && defined(__aarch64__)
+#if defined(_WIN64) && (defined(__aarch64__) || defined(_M_ARM64))
 #include <windows.h>
 #endif
 
@@ -48,6 +48,7 @@ static PRBool ppc_crypto_support_ = PR_FALSE;
 /*
  * Adapted from the example code in "How to detect New Instruction support in
  * the 4th generation Intel Core processor family" by Max Locktyukhin.
+ * https://www.intel.com/content/dam/develop/external/us/en/documents/how-to-detect-new-instruction-support-in-the-4th-generation-intel-core-processor-family.pdf
  *
  * XGETBV:
  *   Reads an extended control register (XCR) specified by ECX into EDX:EAX.
@@ -115,16 +116,23 @@ CheckX86CPUSupport()
     aesni_support_ = (PRBool)((ecx & ECX_AESNI) != 0 && disable_hw_aes == NULL);
     clmul_support_ = (PRBool)((ecx & ECX_CLMUL) != 0 && disable_pclmul == NULL);
     sha_support_ = (PRBool)((ebx7 & EBX_SHA) != 0 && disable_hw_sha == NULL);
-    /* For AVX we check AVX, OSXSAVE, and XSAVE
-     * as well as XMM and YMM state. */
+    /* For AVX we ensure that:
+     *  - The AVX, OSXSAVE, and XSAVE bits of ECX from CPUID(EAX=1) are set, and
+     *  - the SSE and AVX state bits of XCR0 are set (check_xcr0_ymm).
+     */
     avx_support_ = (PRBool)((ecx & AVX_BITS) == AVX_BITS) && check_xcr0_ymm() &&
                    disable_avx == NULL;
-    /* For AVX2 we check AVX2, BMI1, BMI2, FMA, MOVBE.
-     * We do not check for AVX above. */
-    avx2_support_ = (PRBool)((ebx7 & AVX2_EBX_BITS) == AVX2_EBX_BITS &&
+    /* For AVX2 we ensure that:
+     *  - AVX is supported,
+     *  - the AVX2, BMI1, and BMI2 bits of EBX from CPUID(EAX=7) are set, and
+     *  - the FMA, and MOVBE bits of ECX from CPUID(EAX=1) are set.
+     * We do not check for LZCNT support.
+     */
+    avx2_support_ = (PRBool)(avx_support_ == PR_TRUE &&
+                             (ebx7 & AVX2_EBX_BITS) == AVX2_EBX_BITS &&
                              (ecx & AVX2_ECX_BITS) == AVX2_ECX_BITS &&
                              disable_avx2 == NULL);
-    /* CPUID.(EAX=07H, ECX=0H):EBX.ADX[bit 19]=1 indicates 
+    /* CPUID.(EAX=07H, ECX=0H):EBX.ADX[bit 19]=1 indicates
     the processor supports ADCX and ADOX instructions.*/
     adx_support_ = (PRBool)((ebx7 & EBX_ADX) != 0 && disable_adx == NULL);
     ssse3_support_ = (PRBool)((ecx & ECX_SSSE3) != 0 &&
@@ -148,11 +156,11 @@ CheckX86CPUSupport()
 #include <sys/auxv.h>
 #endif
 extern unsigned long getauxval(unsigned long type) __attribute__((weak));
-#elif defined(__arm__) || (!defined(__OpenBSD__) && !defined(_WIN64))
+#elif defined(__arm__) || !defined(_WIN64)
 static unsigned long (*getauxval)(unsigned long) = NULL;
 #endif /* defined(__GNUC__) && __GNUC__ >= 2 && defined(__ELF__)*/
 
-#if defined(__FreeBSD__) && !defined(__aarch64__) && __has_include(<sys/auxv.h>)
+#if (defined(__FreeBSD__) || defined(__OpenBSD__)) && __has_include(<sys/auxv.h>)
 /* Avoid conflict with static declaration above */
 #define getauxval freebl_getauxval
 static unsigned long getauxval(unsigned long type)
@@ -178,7 +186,7 @@ static unsigned long getauxval(unsigned long type)
 #endif /* defined(__aarch64__) || defined(__arm__) */
 /* clang-format on */
 
-#if defined(__aarch64__)
+#if defined(__aarch64__) || defined(_M_ARM64)
 
 #if defined(__linux__)
 // Defines from hwcap.h in Linux kernel - ARM64
@@ -226,7 +234,8 @@ CheckARMSupport()
     arm_pmull_support_ = arm_crypto_support;
     arm_sha1_support_ = arm_crypto_support;
     arm_sha2_support_ = arm_crypto_support;
-#elif defined(__linux__)
+#elif (defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__)) && \
+    __has_include(<sys/auxv.h>)
     if (getauxval) {
         long hwcaps = getauxval(AT_HWCAP);
         arm_aes_support_ = (hwcaps & HWCAP_AES) == HWCAP_AES;
@@ -510,11 +519,10 @@ ppc_crypto_support()
 #endif
 
 /* clang-format off */
-#if defined(__linux__) || (defined(__FreeBSD__) && __FreeBSD__ >= 12)
-#if __has_include(<sys/auxv.h>)
+#if (defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__)) && \
+    __has_include(<sys/auxv.h>)
 #include <sys/auxv.h>
-#endif
-#elif (defined(__FreeBSD__) && __FreeBSD__ < 12)
+#elif defined(__FreeBSD__)
 #include <sys/sysctl.h>
 #endif
 
@@ -529,19 +537,13 @@ CheckPPCSupport()
     char *disable_hw_crypto = PR_GetEnvSecure("NSS_DISABLE_PPC_GHASH");
 
     unsigned long hwcaps = 0;
-#if defined(__linux__)
-#if __has_include(<sys/auxv.h>)
+#if defined(__linux__) && __has_include(<sys/auxv.h>)
     hwcaps = getauxval(AT_HWCAP2);
-#endif
-#elif defined(__FreeBSD__)
-#if __FreeBSD__ >= 12
-#if __has_include(<sys/auxv.h>)
+#elif (defined(__FreeBSD__) || defined(__OpenBSD__)) && __has_include(<sys/auxv.h>)
     elf_aux_info(AT_HWCAP2, &hwcaps, sizeof(hwcaps));
-#endif
-#else
+#elif defined(__FreeBSD__)
     size_t len = sizeof(hwcaps);
     sysctlbyname("hw.cpu_features2", &hwcaps, &len, NULL, 0);
-#endif
 #endif
 
     ppc_crypto_support_ = hwcaps & PPC_FEATURE2_VEC_CRYPTO && disable_hw_crypto == NULL;
@@ -555,7 +557,7 @@ FreeblInit(void)
 {
 #ifdef NSS_X86_OR_X64
     CheckX86CPUSupport();
-#elif (defined(__aarch64__) || defined(__arm__))
+#elif (defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64))
     CheckARMSupport();
 #elif (defined(__powerpc__))
     CheckPPCSupport();
@@ -564,7 +566,7 @@ FreeblInit(void)
 }
 
 SECStatus
-BL_Init()
+BL_Init(void)
 {
     if (PR_CallOnce(&coFreeblInit, FreeblInit) != PR_SUCCESS) {
         PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);

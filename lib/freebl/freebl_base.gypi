@@ -21,27 +21,13 @@
     'dsa.c',
     'ec.c',
     'ecdecode.c',
-    'ecl/ec_naf.c',
-    'ecl/ecl.c',
-    'ecl/ecl_gf.c',
-    'ecl/ecl_mult.c',
     'ecl/ecp_25519.c',
-    'ecl/ecp_256.c',
-    'ecl/ecp_256_32.c',
-    'ecl/ecp_384.c',
-    'ecl/ecp_521.c',
-    'ecl/ecp_aff.c',
-    'ecl/ecp_jac.c',
-    'ecl/ecp_jm.c',
-    'ecl/ecp_mont.c',
     'ecl/ecp_secp256r1.c',
     'ecl/ecp_secp384r1.c',
     'ecl/ecp_secp521r1.c',
-    'verified/Hacl_P256.c',
     'fipsfreebl.c',
     'blinit.c',
     'freeblver.c',
-    'gcm.c',
     'hmacct.c',
     'jpake.c',
     'ldvector.c',
@@ -64,8 +50,13 @@
     'tlsprfalg.c',
     'secmpi.c',
     'verified/Hacl_Hash_SHA3.c',
+    'verified/Hacl_P256.c',
+    'verified/Hacl_P384.c',
+    'verified/Hacl_P521.c',
     'sha3.c',
     'shake.c',
+    'verified/Hacl_Curve25519_51.c',
+    'verified/Hacl_Ed25519.c',
   ],
   'conditions': [
     [ 'OS=="linux" or OS=="android"', {
@@ -76,19 +67,6 @@
             'mpi/mpi_amd64.c',
             'mpi/mpi_amd64_common.S',
             'mpi/mp_comba.c',
-          ],
-          'conditions': [
-            [ 'cc_is_clang==1 and fuzz!=1 and coverage!=1 and force_integrated_as!=1', {
-              'cflags': [
-                '-no-integrated-as',
-              ],
-              'cflags_mozilla': [
-                '-no-integrated-as',
-              ],
-              'asflags_mozilla': [
-                '-no-integrated-as',
-              ],
-            }],
           ],
         }],
         [ 'target_arch=="ia32"', {
@@ -120,26 +98,11 @@
             'mpi/mpi_amd64.c',
             'mpi/mpi_amd64_masm.asm',
             'mpi/mp_comba_amd64_masm.asm',
-            'intel-aes-x64-masm.asm',
-            'intel-gcm-x64-masm.asm',
           ],
         }],
         [ 'cc_use_gnu_ld!=1 and target_arch=="ia32"', {
           'sources': [
             'mpi/mpi_x86_asm.c',
-            'intel-aes-x86-masm.asm',
-            'intel-gcm-x86-masm.asm',
-          ],
-        }],
-        [ 'cc_use_gnu_ld==1', {
-          # mingw
-          'sources': [
-          ],
-        }],
-        [ 'cc_is_clang!=1', {
-          # MSVC
-          'sources': [
-            'intel-gcm-wrap.c',
           ],
         }],
       ],
@@ -221,7 +184,6 @@
             'mpi/mp_comba.c',
           ],
           'defines': [
-            'MP_IS_LITTLE_ENDIAN',
             'MPI_AMD64',
             'MP_ASSEMBLY_MULTIPLY',
             'NSS_USE_COMBA',

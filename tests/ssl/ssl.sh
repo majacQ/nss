@@ -83,6 +83,16 @@ ssl_init()
     padd=$(echo $cwd | cut -d "/" -f4 | sed 's/[^0-9]//g')
     PORT=$(($PORT + $padd))
   fi
+
+  # Check if the port is already in use before starting tests.
+  if command -v ss > /dev/null 2>&1; then
+    if ss -tln 2>/dev/null | grep -q ":${PORT} "; then
+      echo "$SCRIPTNAME: ERROR: Port ${PORT} is already in use." >&2
+      echo "  Set a different port with: PORT=9443 ./all.sh" >&2
+      Exit 10 "Port ${PORT} is already in use"
+    fi
+  fi
+
   NSS_SSL_TESTS=${NSS_SSL_TESTS:-normal_normal}
   nss_ssl_run="stapling signed_cert_timestamps cov auth dtls scheme exporter"
   NSS_SSL_RUN=${NSS_SSL_RUN:-$nss_ssl_run}
@@ -122,7 +132,13 @@ ssl_init()
   TLS13_CIPHER_SUITES="-c ${TLS13_SUITES}${EC_SUITES}${NON_EC_SUITES}"
 
   # in fips mode, turn off curve25519 until it's NIST approved
-  FIPS_OPTIONS="-I P256,P384,P521,FF2048,FF3072,FF4096,FF6144,FF8192"
+  FIPS_OPTIONS=""
+  # in fips mode, turn off curve25519 until it's NIST approved
+  ALL_GROUPS="P256,P384,P521,x25519,FF2048,FF3072,FF4096,FF6144,FF8192,x25519mlkem768,secp256r1mlkem768,secp384r1mlkem1024"
+  NON_PQ_GROUPS="P256,P384,P521,x25519,FF2048,FF3072,FF4096,FF6144,FF8192"
+  FIPS_GROUPS="P256,P384,P521,FF2048,FF3072,FF4096,FF6144,FF8192,x25519mlkem768,secp256r1mlkem768,secp384r1mlkem1024"
+  FIPS_NON_PQ_GROUPS="P256,P384,P521,FF2048,FF3072,FF4096,FF6144,FF8192"
+
 
   # in non-fips mode, tstclnt may run without the db password in some
   # cases, but in fips mode it's always needed
@@ -152,7 +168,7 @@ is_selfserv_alive()
   fi
 
   if [ "${OS_ARCH}" = "WINNT" ] && \
-     [ "$OS_NAME" = "CYGWIN_NT" -o "$OS_NAME" = "MINGW32_NT" ]; then
+     [ "$OS_NAME" = "CYGWIN_NT" -o "$OS_NAME" = "MINGW32_NT" -o "$OS_NAME" = "MSYS_NT" ]; then
       PID=${SHELL_SERVERPID}
   else
       PID=`cat ${SERVERPID}`
@@ -194,23 +210,11 @@ wait_for_selfserv()
 ########################################################################
 kill_selfserv()
 {
-  if [ "${OS_ARCH}" = "WINNT" ] && \
-     [ "$OS_NAME" = "CYGWIN_NT" -o "$OS_NAME" = "MINGW32_NT" ]; then
-      PID=${SHELL_SERVERPID}
-  else
-      PID=`cat ${SERVERPID}`
-  fi
+  PID=`cat ${SERVERPID}`
 
   echo "trying to kill selfserv with PID ${PID} at `date`"
 
-  if [ "${OS_ARCH}" = "WINNT" -o "${OS_ARCH}" = "WIN95" -o "${OS_ARCH}" = "OS2" ]; then
-      echo "${KILL} ${PID}"
-      ${KILL} ${PID}
-  else
-      echo "${KILL} -USR1 ${PID}"
-      ${KILL} -USR1 ${PID}
-  fi
-  wait ${PID}
+  safe_kill ${PID} ${SHELL_SERVERPID}
   if [ ${fileout} -eq 1 ]; then
       cat ${SERVEROUTFILE}
   fi
@@ -228,7 +232,7 @@ kill_selfserv()
   echo "selfserv with PID ${PID} killed at `date`"
 
   rm ${SERVERPID}
-  html_detect_core "kill_selfserv core detection step"
+  html_detect_core_force "kill_selfserv core detection step"
 }
 
 ########################### start_selfserv #############################
@@ -242,29 +246,40 @@ start_selfserv()
       echo "$SCRIPTNAME: $testname ----"
   fi
   if [ -z "$NO_ECC_CERTS" -o "$NO_ECC_CERTS" != "1" ] ; then
-      ECC_OPTIONS="-e ${HOSTADDR}-ecmixed -e ${HOSTADDR}-ec"
+      ECC_OPTIONS="-e ${HOSTADDR}-ecmixed -e ${HOSTADDR}-ec "
   else
       ECC_OPTIONS=""
+  fi
+  if [ -z "$NO_ML_DSA_CERTS" -o "$NO_ML_DSA_CERTS" != "1" ] ; then
+      ML_DSA_OPTIONS="-e ${HOSTADDR}-ml-dsa-44 -e ${HOSTADDR}-ml-dsa-65 -e ${HOSTADDR}-ml-dsa-87 "
+  else
+      ML_DSA_OPTIONS=""
   fi
   if [ -z "$RSA_PSS_CERT" -o "$RSA_PSS_CERT" != "1" ] ; then
       RSA_OPTIONS="-n ${HOSTADDR}"
   else
       RSA_OPTIONS="-n ${HOSTADDR}-rsa-pss"
   fi
+  if [ -z "$NSS_DISABLE_DSA" ]; then
+      DSA_OPTIONS="-S ${HOSTADDR}-dsa "
+  else
+      DSA_OPTIONS=""
+  fi
+
   SERVER_VMIN=${SERVER_VMIN-ssl3}
   SERVER_VMAX=${SERVER_VMAX-tls1.2}
   echo "selfserv starting at `date`"
   echo "selfserv -D -p ${PORT} -d ${P_R_SERVERDIR} ${RSA_OPTIONS} ${SERVER_OPTIONS} \\"
-  echo "         ${ECC_OPTIONS} -S ${HOSTADDR}-dsa -w nss "$@" -i ${R_SERVERPID}\\"
+  echo "         ${ECC_OPTIONS}${DSA_OPTIONS}${ML_DSA_OPTIONS}-w nss "$@" -i ${R_SERVERPID}\\"
   echo "         -V ${SERVER_VMIN}:${SERVER_VMAX} $verbose -H 1 &"
   if [ ${fileout} -eq 1 ]; then
       ${PROFTOOL} ${BINDIR}/selfserv -D -p ${PORT} -d ${P_R_SERVERDIR} ${RSA_OPTIONS} ${SERVER_OPTIONS} \
-               ${ECC_OPTIONS} -S ${HOSTADDR}-dsa -w nss "$@" -i ${R_SERVERPID} -V ${SERVER_VMIN}:${SERVER_VMAX} $verbose -H 1 \
+               ${ECC_OPTIONS}${DSA_OPTIONS}${ML_DSA_OPTIONS}-w nss "$@" -i ${R_SERVERPID} -V ${SERVER_VMIN}:${SERVER_VMAX} $verbose -H 1 \
                > ${SERVEROUTFILE} 2>&1 &
       RET=$?
   else
       ${PROFTOOL} ${BINDIR}/selfserv -D -p ${PORT} -d ${P_R_SERVERDIR} ${RSA_OPTIONS} ${SERVER_OPTIONS} \
-               ${ECC_OPTIONS} -S ${HOSTADDR}-dsa -w nss "$@" -i ${R_SERVERPID} -V ${SERVER_VMIN}:${SERVER_VMAX} $verbose -H 1 &
+               ${ECC_OPTIONS}${DSA_OPTIONS}${ML_DSA_OPTIONS}-w nss "$@" -i ${R_SERVERPID} -V ${SERVER_VMIN}:${SERVER_VMAX} $verbose -H 1 &
       RET=$?
   fi
 
@@ -283,19 +298,7 @@ start_selfserv()
   SHELL_SERVERPID=$!
   wait_for_selfserv
 
-  if [ "${OS_ARCH}" = "WINNT" ] && \
-     [ "$OS_NAME" = "CYGWIN_NT" -o "$OS_NAME" = "MINGW32_NT" ]; then
-      PID=${SHELL_SERVERPID}
-  else
-      PID=`cat ${SERVERPID}`
-  fi
-
-  echo "selfserv with PID ${PID} started at `date`"
-}
-
-ignore_blank_lines()
-{
-  LC_ALL=C egrep -v '^[[:space:]]*(#|$)' "$1"
+  echo "selfserv with PID `cat ${SERVERPID}` started at `date`"
 }
 
 ############################## ssl_cov #################################
@@ -311,10 +314,12 @@ ssl_cov()
 
   SAVE_SERVER_OPTIONS=${SERVER_OPTIONS}
   if [ "${SERVER_MODE}" = "fips" ] ; then
-      SERVER_OPTIONS="${SERVER_OPTIONS} ${FIPS_OPTIONS}"
+      SERVER_OPTIONS="${SERVER_OPTIONS} -I ${FIPS_GROUPS} ${FIPS_OPTIONS}"
   fi
   SAVE_CLIENT_OPTIONS=${CLIENT_OPTIONS}
+  CLIENT_GROUPS=${NON_PQ_GROUPS}
   if [ "${CLIENT_MODE}" = "fips" ] ; then
+      CLIENT_GROUPS=${FIPS_NON_PQ_GROUPS}
       CLIENT_OPTIONS="${CLIENT_OPTIONS} ${FIPS_OPTIONS}"
   fi
 
@@ -327,17 +332,26 @@ ssl_cov()
   # cygwin, which means we can't kill selfserv at the end here.
   SSL_COV_TMP=$(mktemp /tmp/ssl_cov.XXXXXX)
   ignore_blank_lines ${SSLCOV} > ${SSL_COV_TMP}
-  while read ectype testmax param testname
+  while read ectype testmax param sig testname
   do
-      echo "${testname}" | grep "EXPORT" > /dev/null
-      EXP=$?
-
-      # RSA-PSS tests are handled in a separate function
-      case $testname in
-        *RSA-PSS)
+      # Select the TLS SIG SCHEME if necessary 
+      TLS_SIG_SCHEMES=""
+      if [ "$sig" = "RSA-PSS" ]; then
+          # RSA-PSS tests are currently handled in a separate function
           continue
-          ;;
-      esac
+      elif [ "$sig" = "ML-DSA-44" ]; then
+          TLS_SIG_SCHEMES="-J mldsa44 "
+      elif [ "$sig" = "ML-DSA-65" ]; then
+          TLS_SIG_SCHEMES="-J mldsa65 "
+      elif [ "$sig" = "ML-DSA-87" ]; then
+          TLS_SIG_SCHEMES="-J mldsa87 "
+      fi
+
+
+      # skip DSA tests if they are disabled
+      if [ -n "$NSS_DISABLE_DSA" -a "$sig" = "DSA" ]; then
+          continue
+      fi
 
       echo "$SCRIPTNAME: running $testname ----------------------------"
       VMAX="ssl3"
@@ -374,13 +388,20 @@ ssl_cov()
               VMIN="ssl3"
       fi
 
+      TLS_GROUPS=${CLIENT_GROUPS}
+      if [ "$ectype" = "MLKEM219" ]; then
+          TLS_GROUPS="x25519mlkem768"
+      elif [ "$ectype" = "MLKEM256" ]; then
+          TLS_GROUPS="secp256r1mlkem768"
+      elif [ "$ectype" = "MLKEM384" ]; then
+          TLS_GROUPS="secp384r1mlkem1024"
+      fi
 
-
-      echo "tstclnt -4 -p ${PORT} -h ${HOSTADDR} -c ${param} -V ${VMIN}:${VMAX} ${CLIENT_OPTIONS} \\"
+      echo "tstclnt -4 -p ${PORT} -h ${HOSTADDR} -c ${param} -I \"${TLS_GROUPS}\" ${TLS_SIG_SCHEMES}-V ${VMIN}:${VMAX} ${CLIENT_OPTIONS} \\"
       echo "        -f -d ${P_R_CLIENTDIR} $verbose -w nss < ${REQUEST_FILE}"
 
       rm ${TMP}/$HOST.tmp.$$ 2>/dev/null
-      ${PROFTOOL} ${BINDIR}/tstclnt -4 -p ${PORT} -h ${HOSTADDR} -c ${param} -V ${VMIN}:${VMAX} ${CLIENT_OPTIONS} -f \
+      ${PROFTOOL} ${BINDIR}/tstclnt -4 -p ${PORT} -h ${HOSTADDR} -c ${param} -I "${TLS_GROUPS}" ${TLS_SIG_SCHEMES}-V ${VMIN}:${VMAX} ${CLIENT_OPTIONS} -f \
               -d ${P_R_CLIENTDIR} $verbose -w nss < ${REQUEST_FILE} \
               >${TMP}/$HOST.tmp.$$  2>&1
       ret=$?
@@ -420,15 +441,12 @@ ssl_cov_rsa_pss()
   VMAX="tls1.2"
 
   ignore_blank_lines ${SSLCOV} | \
-  while read ectype testmax param testname
+  while read ectype testmax param sig testname
   do
-      case $testname in
-        *RSA-PSS)
-          ;;
-        *)
+      # only PSS testa are handled here.
+      if [ "$sig" != "RSA-PSS" ]; then
           continue
-          ;;
-      esac
+      fi
 
       echo "$SCRIPTNAME: running $testname (RSA-PSS) ----------------------------"
 
@@ -508,52 +526,6 @@ ssl_auth()
   html "</TABLE><BR>"
 }
 
-ssl_stapling_sub()
-{
-    #verbose="-v"
-    testname=$1
-    SO=$2
-    value=$3
-
-    if [ "$NORM_EXT" = "Extended Test" ] ; then
-        # these tests use the ext_client directory for tstclnt,
-        # which doesn't contain the required "TestCA" for server cert
-        # verification, I don't know if it would be OK to add it...
-        echo "$SCRIPTNAME: skipping  $testname for $NORM_EXT"
-        return 0
-    fi
-
-    SAVE_SERVER_OPTIONS=${SERVER_OPTIONS}
-    SERVER_OPTIONS="${SERVER_OPTIONS} ${SO}"
-
-    SAVE_P_R_SERVERDIR=${P_R_SERVERDIR}
-    P_R_SERVERDIR=${P_R_SERVERDIR}/../stapling/
-
-    echo "${testname}"
-
-    start_selfserv
-
-    echo "tstclnt -4 -p ${PORT} -h ${HOSTADDR} -f -d ${P_R_CLIENTDIR} $verbose ${CLIENT_OPTIONS} \\"
-    echo "        -c v -T -O -F -M 1 -V ssl3:tls1.2 ${CLIENT_PW} < ${REQUEST_FILE}"
-    rm ${TMP}/$HOST.tmp.$$ 2>/dev/null
-    ${PROFTOOL} ${BINDIR}/tstclnt -4 -p ${PORT} -h ${HOSTADDR} -f ${CLIENT_OPTIONS} \
-            -d ${P_R_CLIENTDIR} $verbose -c v -T -O -F -M 1 -V ssl3:tls1.2 ${CLIENT_PW} < ${REQUEST_FILE} \
-            >${TMP}/$HOST.tmp.$$  2>&1
-    ret=$?
-    cat ${TMP}/$HOST.tmp.$$
-    rm ${TMP}/$HOST.tmp.$$ 2>/dev/null
-
-    # hopefully no workaround for bug #402058 needed here?
-    # (see commands in ssl_auth
-
-    html_msg $ret $value "${testname}" \
-            "produced a returncode of $ret, expected is $value"
-    kill_selfserv
-
-    SERVER_OPTIONS=${SAVE_SERVER_OPTIONS}
-    P_R_SERVERDIR=${SAVE_P_R_SERVERDIR}
-}
-
 ssl_stapling_stress()
 {
     testname="Stress OCSP stapling, server uses random status"
@@ -561,7 +533,7 @@ ssl_stapling_stress()
     value=0
 
     if [ "$NORM_EXT" = "Extended Test" ] ; then
-        # these tests use the ext_client directory for tstclnt,
+        # these tests use the ext_client directory for strsclnt,
         # which doesn't contain the required "TestCA" for server cert
         # verification, I don't know if it would be OK to add it...
         echo "$SCRIPTNAME: skipping  $testname for $NORM_EXT"
@@ -600,26 +572,6 @@ ssl_stapling_stress()
 ssl_stapling()
 {
   html_head "SSL Cert Status (OCSP Stapling) $NORM_EXT - server $SERVER_MODE/client $CLIENT_MODE"
-
-  # tstclnt Exit code:
-  # 0: have fresh and valid revocation data, status good
-  # 1: cert failed to verify, prior to revocation checking
-  # 2: missing, old or invalid revocation data
-  # 3: have fresh and valid revocation data, status revoked
-
-  # selfserv modes
-  # good, revoked, unkown: Include locally signed response. Requires: -A
-  # failure: Include OCSP failure status, such as "try later" (unsigned)
-  # badsig: use a good status but with an invalid signature
-  # corrupted: stapled cert status is an invalid block of data
-
-  ssl_stapling_sub "OCSP stapling, signed response, good status"     "-A TestCA -T good"      0
-  ssl_stapling_sub "OCSP stapling, signed response, revoked status"  "-A TestCA -T revoked"   3
-  ssl_stapling_sub "OCSP stapling, signed response, unknown status"  "-A TestCA -T unknown"   2
-  ssl_stapling_sub "OCSP stapling, unsigned failure response"        "-A TestCA -T failure"   2
-  ssl_stapling_sub "OCSP stapling, good status, bad signature"       "-A TestCA -T badsig"    2
-  ssl_stapling_sub "OCSP stapling, invalid cert status data"         "-A TestCA -T corrupted" 2
-  ssl_stapling_sub "Valid cert, Server doesn't staple"               ""                       2
 
   ssl_stapling_stress
 
@@ -674,6 +626,8 @@ ssl_stress()
       CAUTH=$?
       echo "${testname}" | grep "no login" > /dev/null
       NOLOGIN=$?
+      echo "${testname}" | grep "_DSS_" > /dev/null
+      IS_DSA=$?
 
       if [ "$ectype" = "SNI" -a "$NORM_EXT" = "Extended Test" ] ; then
           echo "$SCRIPTNAME: skipping  $testname for $NORM_EXT"
@@ -682,6 +636,8 @@ ssl_stress()
       elif [ "${NOLOGIN}" -eq 0 ] && \
            [ "${CLIENT_MODE}" = "fips" -o "$NORM_EXT" = "Extended Test" ] ; then
           echo "$SCRIPTNAME: skipping  $testname for $NORM_EXT"
+      elif [ -n "${NSS_DISABLE_DSA}" -a "$IS_DSA" -eq 0 ] ; then
+          echo "$SCRIPTNAME: skipping  $testname for $NORM_EXT (DSA is disabled"
       else
           cparam=`echo $cparam | sed -e 's;_; ;g' -e "s/TestUser/$USER_NICKNAME/g" `
           if [ "$ectype" = "SNI" ]; then
@@ -821,33 +777,6 @@ ssl_crl_ssl()
   html "</TABLE><BR>"
 }
 
-############################# setup_policy #############################
-# local shell function to create policy configuration
-########################################################################
-setup_policy()
-{
-  policy="$1"
-  outdir="$2"
-  OUTFILE="${outdir}/pkcs11.txt"
-  cat > "$OUTFILE" << ++EOF++
-library=
-name=NSS Internal PKCS #11 Module
-parameters=configdir='./client' certPrefix='' keyPrefix='' secmod='secmod.db' flags= updatedir='' updateCertPrefix='' updateKeyPrefix='' updateid='' updateTokenDescription=''
-NSS=Flags=internal,critical trustOrder=75 cipherOrder=100 slotParams=(1={slotFlags=[RSA,DSA,DH,RC2,RC4,DES,RANDOM,SHA1,MD5,MD2,SSL,TLS,AES,Camellia,SEED,SHA256,SHA512] askpw=any timeout=30})
-++EOF++
-  echo "config=${policy}" >> "$OUTFILE"
-  echo "" >> "$OUTFILE"
-  echo "library=${DIST}/${OBJDIR}/lib/libnssckbi.so" >> "$OUTFILE"
-  cat >> "$OUTFILE" << ++EOF++
-name=RootCerts
-NSS=trustOrder=100
-++EOF++
-
-  echo "******************************Testing with: "
-  cat "$OUTFILE"
-  echo "******************************"
-}
-
 ############################## ssl_policy ##############################
 # local shell function to perform SSL Policy tests
 ########################################################################
@@ -864,7 +793,7 @@ ssl_policy()
   fi
 
   echo "Saving pkcs11.txt"
-  cp ${P_R_CLIENTDIR}/pkcs11.txt ${P_R_CLIENTDIR}/pkcs11.txt.sav
+  save_pkcs11 ${P_R_CLIENTDIR}
 
   start_selfserv $CIPHER_SUITES
 
@@ -907,7 +836,7 @@ ssl_policy()
       html_msg $ret ${value} "${testname}" \
                "produced a returncode of $ret, expected is ${value}"
   done
-  cp ${P_R_CLIENTDIR}/pkcs11.txt.sav ${P_R_CLIENTDIR}/pkcs11.txt
+  restore_pkcs11 ${P_R_CLIENTDIR}
 
   kill_selfserv
   html "</TABLE><BR>"
@@ -994,10 +923,6 @@ ssl_policy_pkix_ocsp()
   #verbose="-v"
   html_head "Check that OCSP doesn't break if we disable sha1 $NORM_EXT - server $SERVER_MODE/client $CLIENT_MODE"
 
-  PKIX_SAVE=${NSS_ENABLE_PKIX_VERIFY-"unset"}
-  NSS_ENABLE_PKIX_VERIFY="1"
-  export NSS_ENABLE_PKIX_VERIFY
-
   testname=""
 
   if [ ! -f "${P_R_SERVERDIR}/pkcs11.txt" ] ; then
@@ -1015,18 +940,12 @@ ssl_policy_pkix_ocsp()
   echo " vfyserv -o wrong.host.badssl.com -d ${P_R_SERVERDIR} 2>&1 | tee ${P_R_SERVERDIR}/vfy.out"
   vfyserv -o wrong.host.badssl.com -d ${P_R_SERVERDIR} 2>&1 | tee ${P_R_SERVERDIR}/vfy.out
   # make sure we have the domain mismatch, not bad signature error
-  echo "grep 12276 ${P_R_SERVERDIR}/vfy.out"
-  grep 12276 ${P_R_SERVERDIR}/vfy.out
+  echo "grep -E '12276|5961' ${P_R_SERVERDIR}/vfy.out"
+  grep -E '12276|5961' ${P_R_SERVERDIR}/vfy.out
   RET=$?
   html_msg $RET $RET_EXP "${testname}" \
            "produced a returncode of $RET, expected is $RET_EXP"
 
-  if [ "${PKIX_SAVE}" = "unset" ]; then
-      unset NSS_ENABLE_PKIX_VERIFY
-  else
-      NSS_ENABLE_PKIX_VERIFY=${PKIX_SAVE}
-      export NSS_ENABLE_PKIX_VERIFY
-  fi
   cp ${P_R_SERVERDIR}/pkcs11.txt.sav ${P_R_SERVERDIR}/pkcs11.txt
 
   html "</TABLE><BR>"
@@ -1058,12 +977,12 @@ ssl_policy_selfserv()
   SAVE_SERVER_OPTIONS=${SERVER_OPTIONS}
   # make sure policy is working in the multiprocess case is working on
   # UNIX-like OS's. Other OS's can't properly clean up the child processes
-  # when our test suite kills the parent, so just use the single process 
+  # when our test suite kills the parent, so just use the single process
   # self serve for them
-  if [ "${OS_ARCH}" != "WINNT" -a "${OS_ARCH}" != "WIN95" -a "${OS_ARCH}" != "OS2" ]; then
-      SERVER_OPTIONS="-M 3 ${SERVER_OPTIONS}"
-  fi
-  
+  # if [ "${OS_ARCH}" != "WINNT" ]; then
+  #    SERVER_OPTIONS="-M 3 ${SERVER_OPTIONS}"
+  # fi
+
   start_selfserv $CIPHER_SUITES
 
   SERVER_OPTIONS="${SAVE_SERVER_OPTIONS}"
@@ -1485,9 +1404,7 @@ ssl_run()
     do
         case "${SSL_RUN}" in
         "stapling")
-            if [ -z "$NSS_DISABLE_LIBPKIX" ]; then
-              ssl_stapling
-            fi
+            ssl_stapling
             ;;
         "signed_cert_timestamps")
             ssl_signed_cert_timestamps
@@ -1632,7 +1549,7 @@ ssl_run_tests()
     do
         case "${SSL_TEST}" in
         "policy")
-            if [ "${TEST_MODE}" = "SHARED_DB" ] ; then
+            if using_sql ; then
                 ssl_policy_listsuites
                 ssl_policy_selfserv
                 ssl_policy_pkix_ocsp

@@ -189,7 +189,6 @@ crlgen_GetGeneralName(PLArenaPool *arena, CRLGENGeneratorData *crlGenData,
 
     mark = PORT_ArenaMark(arena);
 
-    nextChunk = data;
     currData = data;
     do {
         int nameLen = 0;
@@ -416,7 +415,7 @@ crlgen_AddAuthKeyID(CRLGENGeneratorData *crlGenData,
         SECU_EncodeAndAddExtensionValue(arena, extHandle, authKeyID,
                                         (*dataArr[1] == '1') ? PR_TRUE : PR_FALSE,
                                         SEC_OID_X509_AUTH_KEY_ID,
-                                        (EXTEN_EXT_VALUE_ENCODER)CERT_EncodeAuthKeyID);
+                                        EXTEN_EXT_VALUE_ENCODER_CERT_EncodeAuthKeyID);
 loser:
     if (arena)
         PORT_FreeArena(arena, PR_FALSE);
@@ -475,7 +474,7 @@ crlgen_AddIssuerAltNames(CRLGENGeneratorData *crlGenData,
         SECU_EncodeAndAddExtensionValue(arena, extHandle, nameList,
                                         (*dataArr[1] == '1') ? PR_TRUE : PR_FALSE,
                                         SEC_OID_X509_ISSUER_ALT_NAME,
-                                        (EXTEN_EXT_VALUE_ENCODER)CERT_EncodeAltNameExtension);
+                                        EXTEN_EXT_VALUE_ENCODER_CERT_EncodeAltNameExtension);
 loser:
     if (arena)
         PORT_FreeArena(arena, PR_FALSE);

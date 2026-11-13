@@ -38,7 +38,7 @@ static const struct FREEBLVectorStr vector = {
     DSA_VerifyDigest,
     DSA_NewKeyFromSeed,
     DSA_SignDigestWithSeed,
-    DH_GenParam,
+    (F_DH_GenParam)FREEBL_Deprecated,
     DH_NewKey,
     DH_Derive,
     KEA_Derive,
@@ -432,6 +432,38 @@ static const struct FREEBLVectorStr vector = {
     SHAKE_256_Hash,
 
     /* End of version 3.026 */
+
+    Kyber_NewKey,
+    Kyber_Encapsulate,
+    Kyber_Decapsulate,
+
+    /* End of version 3.027 */
+
+    ED_SignMessage,
+    ED_VerifyMessage,
+    ED_DerivePublicKey,
+    /* End of version 3.028 */
+
+    X25519_DerivePublicKey,
+    /* End of version 3.029 */
+
+    EC_DerivePublicKey,
+    /* End of version 3.030 */
+
+    MLDSA_NewKey,
+    MLDSA_SignInit,
+    MLDSA_SignUpdate,
+    MLDSA_SignFinal,
+    MLDSA_VerifyInit,
+    MLDSA_VerifyUpdate,
+    MLDSA_VerifyFinal,
+    /* End of version 3.031 */
+
+    EC_DecompressPublicKey,
+    /* End of version 3.032 */
+
+    MLDSA_DestroyContext,
+    /* End of version 3.033 */
 };
 
 const FREEBLVector*

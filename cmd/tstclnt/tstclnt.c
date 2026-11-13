@@ -29,7 +29,6 @@
 #include "prnetdb.h"
 #include "nss.h"
 #include "nssb64.h"
-#include "ocsp.h"
 #include "ssl.h"
 #include "sslproto.h"
 #include "sslexp.h"
@@ -37,6 +36,7 @@
 #include "secmod.h"
 #include "plgetopt.h"
 #include "plstr.h"
+#include "zlib.h"
 
 #if defined(WIN32)
 #include <fcntl.h>
@@ -55,11 +55,6 @@
 #define ZERO_RTT_MAX (2 << 16)
 
 #define EXIT_CODE_HANDSHAKE_FAILED 254
-
-#define EXIT_CODE_SIDECHANNELTEST_GOOD 0
-#define EXIT_CODE_SIDECHANNELTEST_BADCERT 1
-#define EXIT_CODE_SIDECHANNELTEST_NODATA 2
-#define EXIT_CODE_SIDECHANNELTEST_REVOKED 3
 
 PRIntervalTime maxInterval = PR_INTERVAL_NO_TIMEOUT;
 
@@ -112,43 +107,6 @@ unsigned int enabledSigSchemeCount = 0;
 SECItem psk = { siBuffer, NULL, 0 };
 SECItem pskLabel = { siBuffer, NULL, 0 };
 
-const char *
-signatureSchemeName(SSLSignatureScheme scheme)
-{
-    switch (scheme) {
-#define strcase(x)    \
-    case ssl_sig_##x: \
-        return #x
-        strcase(none);
-        strcase(rsa_pkcs1_sha1);
-        strcase(rsa_pkcs1_sha256);
-        strcase(rsa_pkcs1_sha384);
-        strcase(rsa_pkcs1_sha512);
-        strcase(ecdsa_sha1);
-        strcase(ecdsa_secp256r1_sha256);
-        strcase(ecdsa_secp384r1_sha384);
-        strcase(ecdsa_secp521r1_sha512);
-        strcase(rsa_pss_rsae_sha256);
-        strcase(rsa_pss_rsae_sha384);
-        strcase(rsa_pss_rsae_sha512);
-        strcase(ed25519);
-        strcase(ed448);
-        strcase(rsa_pss_pss_sha256);
-        strcase(rsa_pss_pss_sha384);
-        strcase(rsa_pss_pss_sha512);
-        strcase(dsa_sha1);
-        strcase(dsa_sha256);
-        strcase(dsa_sha384);
-        strcase(dsa_sha512);
-#undef strcase
-        case ssl_sig_rsa_pkcs1_sha1md5:
-            return "RSA PKCS#1 SHA1+MD5";
-        default:
-            break;
-    }
-    return "Unknown Scheme";
-}
-
 void
 printSecurityInfo(PRFileDesc *fd)
 {
@@ -175,13 +133,15 @@ printSecurityInfo(PRFileDesc *fd)
                     channel.isFIPS ? " FIPS" : "");
             FPRINTF(stderr,
                     "tstclnt: Server Auth: %d-bit %s, Key Exchange: %d-bit %s\n"
+                    "         Key Exchange Group: %s\n"
                     "         Compression: %s, Extended Master Secret: %s\n"
                     "         Signature Scheme: %s\n",
                     channel.authKeyBits, suite.authAlgorithmName,
                     channel.keaKeyBits, suite.keaTypeName,
+                    SECU_NamedGroupToGroupName(channel.keaGroup),
                     channel.compressionMethodName,
                     channel.extendedMasterSecretUsed ? "Yes" : "No",
-                    signatureSchemeName(channel.signatureScheme));
+                    SECU_SignatureSchemeName(channel.signatureScheme));
         }
     }
     cert = SSL_RevealCert(fd);
@@ -234,6 +194,8 @@ PrintUsageHeader()
             "  [-A requestfile] [-L totalconnections] [-P {client,server}]\n"
             "  [-N echConfigs] [-Q] [-z externalPsk]\n"
             "  [-i echGreaseSize]\n"
+            "  [--enable-rfc8701-grease] [--enable-ch-extension-permutation]\n"
+            "  [--zlib-certificate-compression] \n"
             "\n",
             progName);
 }
@@ -280,18 +242,6 @@ PrintParameterUsage()
     fprintf(stderr, "%-20s Enable the cert_status extension (OCSP stapling).\n", "-T");
     fprintf(stderr, "%-20s Enable the signed_certificate_timestamp extension.\n", "-U");
     fprintf(stderr, "%-20s Enable the delegated credentials extension.\n", "-B");
-    fprintf(stderr, "%-20s Require fresh revocation info from side channel.\n"
-                    "%-20s -F once means: require for server cert only\n"
-                    "%-20s -F twice means: require for intermediates, too\n"
-                    "%-20s (Connect, handshake with server, disable dynamic download\n"
-                    "%-20s  of OCSP/CRL, verify cert using CERT_PKIXVerifyCert.)\n"
-                    "%-20s Exit code:\n"
-                    "%-20s 0: have fresh and valid revocation data, status good\n"
-                    "%-20s 1: cert failed to verify, prior to revocation checking\n"
-                    "%-20s 2: missing, old or invalid revocation data\n"
-                    "%-20s 3: have fresh and valid revocation data, status revoked\n",
-            "-F", "", "", "", "", "", "", "", "", "");
-    fprintf(stderr, "%-20s Test -F allows 0=any (default), 1=only OCSP, 2=only CRL\n", "-M");
     fprintf(stderr, "%-20s Restrict ciphers\n", "-c ciphers");
     fprintf(stderr, "%-20s Print cipher values allowed for parameter -c and exit\n", "-Y");
     fprintf(stderr, "%-20s Enforce using an IPv4 destination address\n", "-4");
@@ -303,18 +253,48 @@ PrintParameterUsage()
     fprintf(stderr, "%-20s Allow 0-RTT data (TLS 1.3 only)\n", "-Z");
     fprintf(stderr, "%-20s Disconnect and reconnect up to N times total\n", "-L");
     fprintf(stderr, "%-20s Comma separated list of enabled groups for TLS key exchange.\n"
-                    "%-20s The following values are valid:\n"
-                    "%-20s P256, P384, P521, x25519, FF2048, FF3072, FF4096, FF6144, FF8192\n",
-            "-I", "", "");
+                    "%-20s The following values are valid",
+            "-I", "");
+    char comma = ':';
+    const char *groupName;
+    int total = SECU_MAX_COL_LEN;
+    for (size_t i = 0; (groupName = SECU_NamedGroupGetNextName(i)) != NULL; i++) {
+        int len = strlen(groupName);
+        /* 2 represents a comma and a space */
+        if ((total + len + 2) > SECU_MAX_COL_LEN) {
+            fprintf(stderr, "%c\n%-20s %s", comma, "", groupName);
+            /* 21 represents 21 spaces */
+            total = len + 21;
+        } else {
+            fprintf(stderr, "%c %s", comma, groupName);
+            /* 2 represents a comma and a space */
+            total += len + 2;
+        }
+        comma = ',';
+    }
+    fprintf(stderr, "\n");
     fprintf(stderr, "%-20s Comma separated list of signature schemes in preference order.\n"
-                    "%-20s The following values are valid:\n"
-                    "%-20s rsa_pkcs1_sha1, rsa_pkcs1_sha256, rsa_pkcs1_sha384, rsa_pkcs1_sha512,\n"
-                    "%-20s ecdsa_sha1, ecdsa_secp256r1_sha256, ecdsa_secp384r1_sha384,\n"
-                    "%-20s ecdsa_secp521r1_sha512,\n"
-                    "%-20s rsa_pss_rsae_sha256, rsa_pss_rsae_sha384, rsa_pss_rsae_sha512,\n"
-                    "%-20s rsa_pss_pss_sha256, rsa_pss_pss_sha384, rsa_pss_pss_sha512,\n"
-                    "%-20s dsa_sha1, dsa_sha256, dsa_sha384, dsa_sha512\n",
-            "-J", "", "", "", "", "", "", "");
+                    "%-20s The following values are valid",
+            "-J", "");
+
+    comma = ':';
+    const char *schemeName;
+    total = SECU_MAX_COL_LEN;
+    for (size_t i = 0; (schemeName = SECU_SignatureSchemeGetNextScheme(i)) != NULL; i++) {
+        int len = strlen(schemeName);
+        /* 2 represents a comma and a space */
+        if ((total + len + 2) > SECU_MAX_COL_LEN) {
+            fprintf(stderr, "%c\n%-20s %s", comma, "", schemeName);
+            /* 21 represents 21 spaces */
+            total = len + 21;
+        } else {
+            fprintf(stderr, "%c %s", comma, schemeName);
+            /* 2 represents a comma and a space */
+            total += len + 2;
+        }
+        comma = ',';
+    }
+    fprintf(stderr, "\n");
     fprintf(stderr, "%-20s Use DTLS\n", "-P {client, server}");
     fprintf(stderr, "%-20s Exit after handshake\n", "-Q");
     fprintf(stderr, "%-20s Use Encrypted Client Hello with the given Base64-encoded ECHConfigs\n", "-N");
@@ -406,16 +386,11 @@ disableAllSSLCiphers()
 typedef struct
 {
     PRBool shouldPause; /* PR_TRUE if we should use asynchronous peer cert
-                        * authentication */
+                         * authentication */
     PRBool isPaused;    /* PR_TRUE if libssl is waiting for us to validate the
-                        * peer's certificate and restart the handshake. */
+                         * peer's certificate and restart the handshake. */
     void *dbHandle;     /* Certificate database handle to use while
-                        * authenticating the peer's certificate. */
-    PRBool testFreshStatusFromSideChannel;
-    PRErrorCode sideChannelRevocationTestResultCode;
-    PRBool requireDataForIntermediates;
-    PRBool allowOCSPSideChannelData;
-    PRBool allowCRLSideChannelData;
+                         * authenticating the peer's certificate. */
 } ServerCertAuth;
 
 /*
@@ -432,163 +407,14 @@ ownBadCertHandler(void *arg, PRFileDesc *socket)
     return SECSuccess; /* override, say it's OK. */
 }
 
-#define EXIT_CODE_SIDECHANNELTEST_GOOD 0
-#define EXIT_CODE_SIDECHANNELTEST_BADCERT 1
-#define EXIT_CODE_SIDECHANNELTEST_NODATA 2
-#define EXIT_CODE_SIDECHANNELTEST_REVOKED 3
-
-static void
-verifyFromSideChannel(CERTCertificate *cert, ServerCertAuth *sca)
-{
-    PRUint64 revDoNotUse =
-        CERT_REV_M_DO_NOT_TEST_USING_THIS_METHOD;
-
-    PRUint64 revUseLocalOnlyAndSoftFail =
-        CERT_REV_M_TEST_USING_THIS_METHOD |
-        CERT_REV_M_FORBID_NETWORK_FETCHING |
-        CERT_REV_M_REQUIRE_INFO_ON_MISSING_SOURCE |
-        CERT_REV_M_IGNORE_MISSING_FRESH_INFO |
-        CERT_REV_M_STOP_TESTING_ON_FRESH_INFO;
-
-    PRUint64 revUseLocalOnlyAndHardFail =
-        CERT_REV_M_TEST_USING_THIS_METHOD |
-        CERT_REV_M_FORBID_NETWORK_FETCHING |
-        CERT_REV_M_REQUIRE_INFO_ON_MISSING_SOURCE |
-        CERT_REV_M_FAIL_ON_MISSING_FRESH_INFO |
-        CERT_REV_M_STOP_TESTING_ON_FRESH_INFO;
-
-    PRUint64 methodFlagsDoNotUse[2];
-    PRUint64 methodFlagsCheckSoftFail[2];
-    PRUint64 methodFlagsCheckHardFail[2];
-    CERTRevocationTests revTestsDoNotCheck;
-    CERTRevocationTests revTestsOverallSoftFail;
-    CERTRevocationTests revTestsOverallHardFail;
-    CERTRevocationFlags rev;
-    CERTValInParam cvin[2];
-    CERTValOutParam cvout[1];
-    SECStatus rv;
-
-    methodFlagsDoNotUse[cert_revocation_method_crl] = revDoNotUse;
-    methodFlagsDoNotUse[cert_revocation_method_ocsp] = revDoNotUse;
-
-    methodFlagsCheckSoftFail[cert_revocation_method_crl] =
-        sca->allowCRLSideChannelData ? revUseLocalOnlyAndSoftFail : revDoNotUse;
-    methodFlagsCheckSoftFail[cert_revocation_method_ocsp] =
-        sca->allowOCSPSideChannelData ? revUseLocalOnlyAndSoftFail : revDoNotUse;
-
-    methodFlagsCheckHardFail[cert_revocation_method_crl] =
-        sca->allowCRLSideChannelData ? revUseLocalOnlyAndHardFail : revDoNotUse;
-    methodFlagsCheckHardFail[cert_revocation_method_ocsp] =
-        sca->allowOCSPSideChannelData ? revUseLocalOnlyAndHardFail : revDoNotUse;
-
-    revTestsDoNotCheck.cert_rev_flags_per_method = methodFlagsDoNotUse;
-    revTestsDoNotCheck.number_of_defined_methods = 2;
-    revTestsDoNotCheck.number_of_preferred_methods = 0;
-    revTestsDoNotCheck.cert_rev_method_independent_flags =
-        CERT_REV_MI_TEST_ALL_LOCAL_INFORMATION_FIRST |
-        CERT_REV_MI_NO_OVERALL_INFO_REQUIREMENT;
-
-    revTestsOverallSoftFail.cert_rev_flags_per_method = 0; /* must define later */
-    revTestsOverallSoftFail.number_of_defined_methods = 2;
-    revTestsOverallSoftFail.number_of_preferred_methods = 0;
-    revTestsOverallSoftFail.cert_rev_method_independent_flags =
-        CERT_REV_MI_TEST_ALL_LOCAL_INFORMATION_FIRST |
-        CERT_REV_MI_NO_OVERALL_INFO_REQUIREMENT;
-
-    revTestsOverallHardFail.cert_rev_flags_per_method = 0; /* must define later */
-    revTestsOverallHardFail.number_of_defined_methods = 2;
-    revTestsOverallHardFail.number_of_preferred_methods = 0;
-    revTestsOverallHardFail.cert_rev_method_independent_flags =
-        CERT_REV_MI_TEST_ALL_LOCAL_INFORMATION_FIRST |
-        CERT_REV_MI_REQUIRE_SOME_FRESH_INFO_AVAILABLE;
-
-    rev.chainTests = revTestsDoNotCheck;
-    rev.leafTests = revTestsDoNotCheck;
-
-    cvin[0].type = cert_pi_revocationFlags;
-    cvin[0].value.pointer.revocation = &rev;
-    cvin[1].type = cert_pi_end;
-
-    cvout[0].type = cert_po_end;
-
-    /* Strategy:
-     *
-     * Verify with revocation checking disabled.
-     * On failure return 1.
-     *
-     * if result if "good", then continue testing.
-     *
-     * Verify with CERT_REV_M_FAIL_ON_MISSING_FRESH_INFO.
-     * If result is good, return 0.
-     *
-     * On failure continue testing, find out why it failed.
-     *
-     * Verify with CERT_REV_M_IGNORE_MISSING_FRESH_INFO
-     *
-     * If result is "good", then our previous test failed,
-     * because we don't have fresh revocation info, return 2.
-     *
-     * If result is still bad, we do have revocation info,
-     * and it says "revoked" or something equivalent, return 3.
-     */
-
-    /* revocation checking disabled */
-    rv = CERT_PKIXVerifyCert(cert, certificateUsageSSLServer,
-                             cvin, cvout, NULL);
-    if (rv != SECSuccess) {
-        sca->sideChannelRevocationTestResultCode =
-            EXIT_CODE_SIDECHANNELTEST_BADCERT;
-        return;
-    }
-
-    /* revocation checking, hard fail */
-    if (sca->allowOCSPSideChannelData && sca->allowCRLSideChannelData) {
-        /* any method is allowed. use soft fail on individual checks,
-         * but use hard fail on the overall check
-         */
-        revTestsOverallHardFail.cert_rev_flags_per_method = methodFlagsCheckSoftFail;
-    } else {
-        /* only one method is allowed. use hard fail on the individual checks.
-         * hard/soft fail is irrelevant on overall flags.
-         */
-        revTestsOverallHardFail.cert_rev_flags_per_method = methodFlagsCheckHardFail;
-    }
-    rev.leafTests = revTestsOverallHardFail;
-    rev.chainTests =
-        sca->requireDataForIntermediates ? revTestsOverallHardFail : revTestsDoNotCheck;
-    rv = CERT_PKIXVerifyCert(cert, certificateUsageSSLServer,
-                             cvin, cvout, NULL);
-    if (rv == SECSuccess) {
-        sca->sideChannelRevocationTestResultCode =
-            EXIT_CODE_SIDECHANNELTEST_GOOD;
-        return;
-    }
-
-    /* revocation checking, soft fail */
-    revTestsOverallSoftFail.cert_rev_flags_per_method = methodFlagsCheckSoftFail;
-    rev.leafTests = revTestsOverallSoftFail;
-    rev.chainTests =
-        sca->requireDataForIntermediates ? revTestsOverallSoftFail : revTestsDoNotCheck;
-    rv = CERT_PKIXVerifyCert(cert, certificateUsageSSLServer,
-                             cvin, cvout, NULL);
-    if (rv == SECSuccess) {
-        sca->sideChannelRevocationTestResultCode =
-            EXIT_CODE_SIDECHANNELTEST_NODATA;
-        return;
-    }
-
-    sca->sideChannelRevocationTestResultCode =
-        EXIT_CODE_SIDECHANNELTEST_REVOKED;
-}
-
 static void
 dumpCertificatePEM(CERTCertificate *cert)
 {
-    SECItem data;
-    data.data = cert->derCert.data;
-    data.len = cert->derCert.len;
-    fprintf(stderr, "%s\n%s\n%s\n", NS_CERT_HEADER,
-            BTOA_DataToAscii(data.data, data.len), NS_CERT_TRAILER);
+    char *asciiDER = BTOA_DataToAscii(cert->derCert.data, cert->derCert.len);
+    if (asciiDER) {
+        fprintf(stderr, "%s\n%s\n%s\n", NS_CERT_HEADER, asciiDER, NS_CERT_TRAILER);
+        PORT_Free(asciiDER);
+    }
 }
 
 static void
@@ -604,9 +430,9 @@ dumpServerCertificateChain(PRFileDesc *fd)
     if (!dumpServerChain) {
         return;
     } else if (dumpServerChain == 1) {
-        dumpFunction = (SECU_PPFunc)SECU_PrintCertificateBasicInfo;
+        dumpFunction = SECU_PrintCertificateBasicInfo;
     } else {
-        dumpFunction = (SECU_PPFunc)SECU_PrintCertificate;
+        dumpFunction = SECU_PrintCertificate;
         if (dumpServerChain > 2) {
             dumpCertPEM = PR_TRUE;
         }
@@ -687,44 +513,8 @@ ownAuthCertificate(void *arg, PRFileDesc *fd, PRBool checkSig,
     }
 
     if (!serverCertAuth->shouldPause) {
-        CERTCertificate *cert;
-        unsigned int i;
-        const SECItemArray *csa;
-
-        if (!serverCertAuth->testFreshStatusFromSideChannel) {
-            return SSL_AuthCertificate(serverCertAuth->dbHandle,
-                                       fd, checkSig, isServer);
-        }
-
-        /* No verification attempt must have happened before now,
-         * to ensure revocation data has been actively retrieved yet,
-         * or our test will produce incorrect results.
-         */
-
-        cert = SSL_RevealCert(fd);
-        if (!cert) {
-            exit(254);
-        }
-
-        csa = SSL_PeerStapledOCSPResponses(fd);
-        if (csa) {
-            for (i = 0; i < csa->len; ++i) {
-                PORT_SetError(0);
-                if (CERT_CacheOCSPResponseFromSideChannel(
-                        serverCertAuth->dbHandle, cert, PR_Now(),
-                        &csa->items[i], arg) != SECSuccess) {
-                    PORT_Assert(PR_GetError() != 0);
-                }
-            }
-        }
-
-        verifyFromSideChannel(cert, serverCertAuth);
-        CERT_DestroyCertificate(cert);
-        /* return success to ensure our caller will continue and we will
-         * reach the code that handles
-         * serverCertAuth->sideChannelRevocationTestResultCode
-         */
-        return SECSuccess;
+        return SSL_AuthCertificate(serverCertAuth->dbHandle,
+                                   fd, checkSig, isServer);
     }
 
     FPRINTF(stderr, "%s: using asynchronous certificate validation\n",
@@ -843,7 +633,7 @@ own_GetClientAuthData(void *arg,
     return NSS_GetClientAuthData(arg, socket, caNames, pRetCert, pRetKey);
 }
 
-#if defined(WIN32) || defined(OS2)
+#if defined(WIN32)
 void
 thread_main(void *arg)
 {
@@ -1077,6 +867,9 @@ PRBool enablePostHandshakeAuth = PR_FALSE;
 PRBool enableDelegatedCredentials = PR_FALSE;
 const secuExporter *enabledExporters = NULL;
 unsigned int enabledExporterCount = 0;
+PRBool enableRfc8701Grease = PR_FALSE;
+PRBool enableCHExtensionPermuation = PR_FALSE;
+PRBool zlibCertificateCompression = PR_FALSE;
 
 static int
 writeBytesToServer(PRFileDesc *s, const PRUint8 *buf, int nb)
@@ -1359,6 +1152,49 @@ printEchRetryConfigs(PRFileDesc *s)
     return SECSuccess;
 }
 
+static SECStatus
+zlibCertificateEncode(const SECItem *input, SECItem *output)
+{
+    if (!input || !input->data || input->len == 0 || !output) {
+        PR_SetError(SEC_ERROR_INVALID_ARGS, 0);
+        return SECFailure;
+    }
+
+    unsigned long maxCompressedLen = compressBound(input->len);
+    SECITEM_AllocItem(NULL, output, maxCompressedLen);
+
+    unsigned long outputLenUL = output->len;
+    int ret = compress(output->data, &outputLenUL, input->data, input->len);
+    output->len = outputLenUL;
+    if (ret != Z_OK) {
+        PR_SetError(SEC_ERROR_LIBRARY_FAILURE, 0);
+        return SECFailure;
+    }
+
+    return SECSuccess;
+}
+
+static SECStatus
+zlibCertificateDecode(const SECItem *input,
+                      unsigned char *output, size_t outputLen,
+                      size_t *usedLen)
+{
+    if (!input || !input->data || input->len == 0 || !output || outputLen == 0) {
+        PR_SetError(SEC_ERROR_INVALID_ARGS, 0);
+        return SECFailure;
+    }
+
+    unsigned long outputLenUL = outputLen;
+    int ret = uncompress(output, &outputLenUL, input->data, input->len);
+    *usedLen = outputLenUL;
+    if (ret != Z_OK) {
+        PR_SetError(SEC_ERROR_BAD_DATA, 0);
+        return SECFailure;
+    }
+
+    return SECSuccess;
+}
+
 static int
 run()
 {
@@ -1371,6 +1207,7 @@ run()
     PRFileDesc *std_out;
     PRPollDesc pollset[2] = { { 0 }, { 0 } };
     PRBool wrStarted = PR_FALSE;
+    SSLCertificateCompressionAlgorithm zlibCompressionAlg = { 1, "zlib", zlibCertificateEncode, zlibCertificateDecode };
 
     handshakeComplete = PR_FALSE;
 
@@ -1394,9 +1231,6 @@ run()
     }
     opt.option = PR_SockOpt_Nonblocking;
     opt.value.non_blocking = PR_TRUE; /* default */
-    if (serverCertAuth.testFreshStatusFromSideChannel) {
-        opt.value.non_blocking = PR_FALSE;
-    }
     status = PR_SetSocketOption(s, &opt);
     if (status != PR_SUCCESS) {
         SECU_PrintError(progName, "error setting socket options");
@@ -1454,9 +1288,9 @@ run()
                 cipher |= ctmp;
                 cipherString++;
             } else {
-                if (!isalpha(ndx))
+                if (!isalpha((unsigned char)ndx))
                     Usage();
-                ndx = tolower(ndx) - 'a';
+                ndx = tolower((unsigned char)ndx) - 'a';
                 if (ndx < PR_ARRAY_SIZE(ssl3CipherSuites)) {
                     cipher = ssl3CipherSuites[ndx];
                 }
@@ -1599,6 +1433,33 @@ run()
         }
     }
 
+    if (enableRfc8701Grease) {
+        rv = SSL_OptionSet(s, SSL_ENABLE_GREASE, PR_TRUE);
+        if (rv != SECSuccess) {
+            SECU_PrintError(progName, "error enabling grease");
+            error = 1;
+            goto done;
+        }
+    }
+
+    if (enableCHExtensionPermuation) {
+        rv = SSL_OptionSet(s, SSL_ENABLE_CH_EXTENSION_PERMUTATION, PR_TRUE);
+        if (rv != SECSuccess) {
+            SECU_PrintError(progName, "error enabling ch extension permutation");
+            error = 1;
+            goto done;
+        }
+    }
+
+    if (zlibCertificateCompression) {
+        rv = SSL_SetCertificateCompressionAlgorithm(s, zlibCompressionAlg);
+        if (rv != SECSuccess) {
+            SECU_PrintError(progName, "error setting zlib certificate compression algorithm");
+            error = 1;
+            goto done;
+        }
+    }
+
     if (enabledGroups) {
         rv = SSL_NamedGroupConfig(s, enabledGroups, enabledGroupsCount);
         if (rv < 0) {
@@ -1722,7 +1583,7 @@ run()
     pollset[STDIN_FD].in_flags = PR_POLL_READ;
     std_out = PR_GetSpecialFD(PR_StandardOutput);
 
-#if defined(WIN32) || defined(OS2)
+#if defined(WIN32)
     /* PR_Poll cannot be used with stdin on Windows or OS/2.  (sigh).
     ** But use of PR_Poll and non-blocking sockets is a major feature
     ** of this program.  So, we simulate a pollable stdin with a
@@ -1751,12 +1612,6 @@ run()
         }
     }
 #endif
-
-    if (serverCertAuth.testFreshStatusFromSideChannel) {
-        SSL_ForceHandshake(s);
-        error = serverCertAuth.sideChannelRevocationTestResultCode;
-        goto done;
-    }
 
     /*
     ** Select on stdin and on the socket. Write data from stdin to
@@ -1883,6 +1738,14 @@ done:
     return error;
 }
 
+const char *cmdLineOptions = "46A:BCDEGHI:J:KL:N:OP:QR:STUV:W:X:YZa:bc:d:efgh:i:m:n:op:qr:st:uvw:x:z:";
+const PLLongOpt cmdLineLongOpts[] = {
+    { .longOptName = "enable-rfc8701-grease", .longOption = 0, .valueRequired = PR_FALSE },
+    { .longOptName = "enable-ch-extension-permutation", .longOption = 1, .valueRequired = PR_FALSE },
+    { .longOptName = "zlib-certificate-compression", .longOption = 2, .valueRequired = PR_FALSE },
+    { .longOptName = NULL },
+};
+
 int
 main(int argc, char **argv)
 {
@@ -1903,11 +1766,6 @@ main(int argc, char **argv)
     serverCertAuth.shouldPause = PR_TRUE;
     serverCertAuth.isPaused = PR_FALSE;
     serverCertAuth.dbHandle = NULL;
-    serverCertAuth.testFreshStatusFromSideChannel = PR_FALSE;
-    serverCertAuth.sideChannelRevocationTestResultCode = EXIT_CODE_HANDSHAKE_FAILED;
-    serverCertAuth.requireDataForIntermediates = PR_FALSE;
-    serverCertAuth.allowOCSPSideChannelData = PR_TRUE;
-    serverCertAuth.allowCRLSideChannelData = PR_TRUE;
 
     progName = strrchr(argv[0], '/');
     if (!progName)
@@ -1922,13 +1780,24 @@ main(int argc, char **argv)
         }
     }
 
-    optstate = PL_CreateOptState(argc, argv,
-                                 "46A:BCDEFGHI:J:KL:M:N:OP:QR:STUV:W:X:YZa:bc:d:efgh:i:m:n:op:qr:st:uvw:x:z:");
+    optstate = PL_CreateLongOptState(argc, argv, cmdLineOptions, cmdLineLongOpts);
     while ((optstatus = PL_GetNextOpt(optstate)) == PL_OPT_OK) {
-        switch (optstate->option) {
+        switch (optstate->longOption) {
             case '?':
             default:
                 Usage();
+                break;
+
+            case 0:
+                enableRfc8701Grease = PR_TRUE;
+                break;
+
+            case 1:
+                enableCHExtensionPermuation = PR_TRUE;
+                break;
+
+            case 2:
+                zlibCertificateCompression = PR_TRUE;
                 break;
 
             case '4':
@@ -1962,14 +1831,6 @@ main(int argc, char **argv)
                 enablePostHandshakeAuth = PR_TRUE;
                 break;
 
-            case 'F':
-                if (serverCertAuth.testFreshStatusFromSideChannel) {
-                    /* parameter given twice or more */
-                    serverCertAuth.requireDataForIntermediates = PR_TRUE;
-                }
-                serverCertAuth.testFreshStatusFromSideChannel = PR_TRUE;
-                break;
-
             case 'G':
                 enableExtendedMasterSecret = PR_TRUE;
                 break;
@@ -1989,24 +1850,6 @@ main(int argc, char **argv)
 
             case 'L':
                 numConnections = atoi(optstate->value);
-                break;
-
-            case 'M':
-                switch (atoi(optstate->value)) {
-                    case 1:
-                        serverCertAuth.allowOCSPSideChannelData = PR_TRUE;
-                        serverCertAuth.allowCRLSideChannelData = PR_FALSE;
-                        break;
-                    case 2:
-                        serverCertAuth.allowOCSPSideChannelData = PR_FALSE;
-                        serverCertAuth.allowCRLSideChannelData = PR_TRUE;
-                        break;
-                    case 0:
-                    default:
-                        serverCertAuth.allowOCSPSideChannelData = PR_TRUE;
-                        serverCertAuth.allowCRLSideChannelData = PR_TRUE;
-                        break;
-                };
                 break;
 
             case 'N':
@@ -2229,12 +2072,6 @@ main(int argc, char **argv)
         Usage();
     }
 
-    if (serverCertAuth.testFreshStatusFromSideChannel &&
-        serverCertAuth.shouldPause) {
-        fprintf(stderr, "%s: -F requires the use of -O\n", progName);
-        exit(1);
-    }
-
     if (certDir && !openDB) {
         fprintf(stderr, "%s: Cannot combine parameters -D and -d\n", progName);
         exit(1);
@@ -2259,13 +2096,25 @@ main(int argc, char **argv)
         addr.inet.port = PR_htons(portno);
     } else {
         PRBool gotLoopbackIP = PR_FALSE;
-        if ((!strcmp(host, "localhost") || !strcmp(host, "localhost.localdomain"))
-            /* only check for preference if both types are allowed */
-            && allowIPv4 && allowIPv6) {
-            /* make a decision which IP to prefer */
-            status = PR_GetPrefLoopbackAddrInfo(&addr, portno);
-            if (status != PR_FAILURE) {
-                gotLoopbackIP = PR_TRUE;
+        if (!strcmp(host, "localhost") || !strcmp(host, "localhost.localdomain")) {
+            if (allowIPv4 && allowIPv6) {
+                /* Both families allowed: use PR_GetPrefLoopbackAddrInfo to
+                 * choose the preferred loopback address without a DNS lookup. */
+                status = PR_GetPrefLoopbackAddrInfo(&addr, portno);
+                if (status != PR_FAILURE) {
+                    gotLoopbackIP = PR_TRUE;
+                }
+            }
+            if (!gotLoopbackIP && (allowIPv4 || allowIPv6)) {
+                /* Only one address family is requested, or
+                 * PR_GetPrefLoopbackAddrInfo failed.  Set the loopback
+                 * address directly without a DNS lookup. */
+                status = PR_StringToNetAddr(allowIPv6 ? "::1" : "127.0.0.1",
+                                            &addr);
+                if (status == PR_SUCCESS) {
+                    addr.inet.port = PR_htons(portno);
+                    gotLoopbackIP = PR_TRUE;
+                }
             }
         }
 

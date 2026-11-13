@@ -9,9 +9,12 @@
 #define _BLAPIT_H_
 
 #include "seccomon.h"
+#include "eccutil.h"
 #include "prlink.h"
 #include "plarena.h"
 #include "ecl-exp.h"
+#include "pkcs11t.h"
+#include "ml_dsat.h"
 
 /* RC2 operation modes */
 #define NSS_RC2 0
@@ -28,6 +31,8 @@
 #define NSS_DES_EDE3_CBC 3
 
 #define DES_KEY_LENGTH 8 /* Bytes */
+
+#define ED25519_SIGN_LEN 64U /* Bytes */
 
 /* AES operation modes */
 #define NSS_AES 0
@@ -81,12 +86,8 @@ typedef int __BLAPI_DEPRECATED __attribute__((deprecated));
 #define EC_MAX_KEY_BITS 521 /* in bits */
 #define EC_MIN_KEY_BITS 256 /* in bits */
 
-/* EC point compression format */
-#define EC_POINT_FORM_COMPRESSED_Y0 0x02
-#define EC_POINT_FORM_COMPRESSED_Y1 0x03
-#define EC_POINT_FORM_UNCOMPRESSED 0x04
-#define EC_POINT_FORM_HYBRID_Y0 0x06
-#define EC_POINT_FORM_HYBRID_Y1 0x07
+#define ECD_MAX_KEY_BITS 255 /* in bits */
+#define ECD_MIN_KEY_BITS 255 /* in bits */
 
 /*
  * Number of bytes each hash algorithm produces
@@ -149,6 +150,10 @@ typedef int __BLAPI_DEPRECATED __attribute__((deprecated));
 #define DH_MIN_P_BITS 128
 #define DH_MAX_P_BITS 16384
 
+/* max signature for all our supported signatures */
+/* currently ML-DSA is the biggest */
+#define MAX_SIGNATURE_LEN MAX_ML_DSA_SIGNATURE_LEN
+
 /*
  * The FIPS 186-1 algorithm for generating primes P and Q allows only 9
  * distinct values for the length of P, and only one value for the
@@ -199,7 +204,7 @@ typedef int __BLAPI_DEPRECATED __attribute__((deprecated));
  * returns index (0..8) or -1 if number of bits is invalid.
  */
 #define PQG_PBITS_TO_INDEX(bits) \
-    (((bits) < 512 || (bits) > 1024 || (bits) % 64) ? -1 : (int)((bits)-512) / 64)
+    (((bits) < 512 || (bits) > 1024 || (bits) % 64) ? -1 : (int)((bits) - 512) / 64)
 
 /*
  * function takes index (0-8)
@@ -300,6 +305,7 @@ struct RSAPublicKeyStr {
     PLArenaPool *arena;
     SECItem modulus;
     SECItem publicExponent;
+    PRBool needVerify;
 };
 typedef struct RSAPublicKeyStr RSAPublicKey;
 
@@ -352,6 +358,26 @@ struct DSAPrivateKeyStr {
 };
 typedef struct DSAPrivateKeyStr DSAPrivateKey;
 
+/* ML DSA structures */
+typedef struct MLDSAPrivateKeyStr MLDSAPrivateKey;
+typedef struct MLDSAPublicKeyStr MLDSAPublicKey;
+typedef struct MLDSAContextStr MLDSAContext;
+
+/* MLDSA keys are 'public' to softoken, while MLDSAContexts are opaque */
+struct MLDSAPrivateKeyStr {
+    CK_ML_DSA_PARAMETER_SET_TYPE paramSet;
+    unsigned char keyVal[MAX_ML_DSA_PRIVATE_KEY_LEN];
+    unsigned int keyValLen;
+    unsigned char seed[ML_DSA_SEED_LEN];
+    unsigned int seedLen;
+};
+
+struct MLDSAPublicKeyStr {
+    CK_ML_DSA_PARAMETER_SET_TYPE paramSet;
+    unsigned char keyVal[MAX_ML_DSA_PUBLIC_KEY_LEN];
+    unsigned int keyValLen;
+};
+
 /***************************************************************************
 ** Diffie-Hellman Public and Private Key and related structures
 ** Structure member names suggested by PKCS#3.
@@ -392,7 +418,9 @@ typedef struct DHPrivateKeyStr DHPrivateKey;
 */
 
 typedef enum { ec_params_explicit,
-               ec_params_named
+               ec_params_named,
+               ec_params_edwards_named,
+               ec_params_montgomery_named,
 } ECParamsType;
 
 typedef enum { ec_field_GFp = 1,
@@ -408,8 +436,8 @@ struct ECFieldIDStr {
         SECItem poly;  /* irreducible binary polynomial for (GF2m) */
     } u;
     int k1; /* first coefficient of pentanomial or
-                         * the only coefficient of trinomial
-                         */
+             * the only coefficient of trinomial
+             */
     int k2; /* two remaining coefficients of pentanomial */
     int k3;
 };
@@ -417,8 +445,8 @@ typedef struct ECFieldIDStr ECFieldID;
 
 struct ECCurveStr {
     SECItem a; /* contains octet stream encoding of
-                         * field element (X9.62 section 4.3.3)
-             */
+                * field element (X9.62 section 4.3.3)
+                */
     SECItem b;
     SECItem seed;
 };
@@ -441,8 +469,8 @@ typedef struct ECParamsStr ECParams;
 struct ECPublicKeyStr {
     ECParams ecParams;
     SECItem publicValue; /* elliptic curve point encoded as
-                * octet stream.
-                */
+                          * octet stream.
+                          */
 };
 typedef struct ECPublicKeyStr ECPublicKey;
 

@@ -52,6 +52,17 @@ enum class NamedCurve {
   secp256r1 = 3,
 };
 
+enum class MLDSAParameterSet {
+  // id-ml-dsa-44 (OID 2.16.840.1.101.3.4.3.17, RFC 9881)
+  ml_dsa_44 = 1,
+
+  // id-ml-dsa-65 (OID 2.16.840.1.101.3.4.3.18, RFC 9881)
+  ml_dsa_65 = 2,
+
+  // id-ml-dsa-87 (OID 2.16.840.1.101.3.4.3.19, RFC 9881)
+  ml_dsa_87 = 3,
+};
+
 enum class EndEntityOrCA { MustBeEndEntity = 0, MustBeCA = 1 };
 
 enum class KeyUsage : uint8_t {
@@ -74,6 +85,12 @@ enum class KeyPurposeId {
   id_kp_codeSigning = 3,      // id-kp-codeSigning
   id_kp_emailProtection = 4,  // id-kp-emailProtection
   id_kp_OCSPSigning = 9,      // id-kp-OCSPSigning
+  // RFC 9336 - X.509 Certificate General-Purpose Extended Key Usage (EKU) for
+  // Document Signing
+  id_kp_documentSigning = 36,  // id-kp-documentSigning
+  // Adobe Authentic Documents Trust (1.2.840.113583.1.1.5)
+  id_kp_documentSigningAdobe,
+  id_kp_documentSigningMicrosoft,
 };
 
 struct CertPolicyId final {
@@ -272,8 +289,7 @@ class TrustDomain {
                                  const CertID& certID, Time time,
                                  Duration validityDuration,
                                  /*optional*/ const Input* stapledOCSPresponse,
-                                 /*optional*/ const Input* aiaExtension,
-                                 /*optional*/ const Input* sctExtension) = 0;
+                                 /*optional*/ const Input* aiaExtension) = 0;
 
   // Check that the given digest algorithm is acceptable for use in signatures.
   //
@@ -334,6 +350,26 @@ class TrustDomain {
                                        Input signature,
                                        Input subjectPublicKeyInfo) = 0;
 
+  // Check that the given ML-DSA parameter set is acceptable for signatures.
+  //
+  // Return Success if the parameter set is acceptable,
+  // Result::ERROR_UNSUPPORTED_KEYALG if the parameter set is not acceptable,
+  // or another error code if another error occurred.
+  virtual Result CheckMLDSAParameterSetIsAcceptable(
+      EndEntityOrCA endEntityOrCA, MLDSAParameterSet parameterSet) = 0;
+
+  // Verify the given pure ML-DSA signature, with an empty context string
+  // (RFC 9881 Section 3), on the given data using the given ML-DSA public key.
+  // parameterSet is the parameter set named by the signature algorithm; the key
+  // must be for that parameter set.
+  //
+  // CheckMLDSAParameterSetIsAcceptable will be called before calling this
+  // function, so it is not necessary to repeat that check here.
+  virtual Result VerifyMLDSASignedData(Input data,
+                                       MLDSAParameterSet parameterSet,
+                                       Input signature,
+                                       Input subjectPublicKeyInfo) = 0;
+
   // Check that the validity duration is acceptable.
   //
   // Return Success if the validity duration is acceptable,
@@ -342,15 +378,6 @@ class TrustDomain {
   virtual Result CheckValidityIsAcceptable(Time notBefore, Time notAfter,
                                            EndEntityOrCA endEntityOrCA,
                                            KeyPurposeId keyPurpose) = 0;
-
-  // For compatibility, a CA certificate with an extended key usage that
-  // contains the id-Netscape-stepUp OID but does not contain the
-  // id-kp-serverAuth OID may be considered valid for issuing server auth
-  // certificates. This function allows TrustDomain implementations to control
-  // this setting based on the start of the validity period of the certificate
-  // in question.
-  virtual Result NetscapeStepUpMatchesServerAuth(Time notBefore,
-                                                 /*out*/ bool& matches) = 0;
 
   // Some certificate or OCSP response extensions do not directly participate
   // in the verification flow, but might still be of interest to the clients
@@ -380,6 +407,7 @@ class TrustDomain {
 };
 
 enum class FallBackToSearchWithinSubject { No = 0, Yes = 1 };
+enum class HandleInvalidSubjectAlternativeNamesBy { Halting = 0, Skipping = 1 };
 
 // Applications control the behavior of matching presented name information from
 // a certificate against a reference hostname by implementing the
@@ -395,6 +423,9 @@ class NameMatchingPolicy {
       Time notBefore,
       /*out*/ FallBackToSearchWithinSubject& fallBackToCommonName) = 0;
 
+  virtual HandleInvalidSubjectAlternativeNamesBy
+  HandleInvalidSubjectAlternativeNames() = 0;
+
  protected:
   NameMatchingPolicy() {}
 
@@ -407,6 +438,9 @@ class StrictNameMatchingPolicy : public NameMatchingPolicy {
   virtual Result FallBackToCommonName(
       Time notBefore,
       /*out*/ FallBackToSearchWithinSubject& fallBacktoCommonName) override;
+
+  virtual HandleInvalidSubjectAlternativeNamesBy
+  HandleInvalidSubjectAlternativeNames() override;
 };
 }  // namespace pkix
 }  // namespace mozilla

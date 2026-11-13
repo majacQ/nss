@@ -84,11 +84,11 @@ struct lgdbSlotDataStr {
 #define LGDB_DB_NOUI_VERSION_MAJOR 0
 #define LGDB_DB_NOUI_VERSION_MINOR 4
 
-#define LGDB_PUTSHORT(dest, src)             \
-    (dest)[1] = (unsigned char)((src)&0xff); \
+#define LGDB_PUTSHORT(dest, src)               \
+    (dest)[1] = (unsigned char)((src) & 0xff); \
     (dest)[0] = (unsigned char)(((src) >> 8) & 0xff);
 #define LGDB_PUTLONG(dest, src)                        \
-    (dest)[3] = (unsigned char)((src)&0xff);           \
+    (dest)[3] = (unsigned char)((src) & 0xff);         \
     (dest)[2] = (unsigned char)(((src) >> 8) & 0xff);  \
     (dest)[1] = (unsigned char)(((src) >> 16) & 0xff); \
     (dest)[0] = (unsigned char)(((src) >> 24) & 0xff);
@@ -286,7 +286,7 @@ lgdb_DecodeData(char *defParams, DBT *data, PRBool *retInternal)
     unsigned short len;
     unsigned short namesOffset = 0;   /* start of the names block */
     unsigned long namesRunningOffset; /* offset to name we are
-                     * currently processing */
+                                       * currently processing */
     unsigned short slotOffset;
     PRBool isOldVersion = PR_FALSE;
     PRBool internal;

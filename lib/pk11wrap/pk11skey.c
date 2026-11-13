@@ -7,10 +7,10 @@
  */
 
 #include <stddef.h>
+#include <limits.h>
 
 #include "seccomon.h"
 #include "secmod.h"
-#include "nssilock.h"
 #include "secmodi.h"
 #include "secmodti.h"
 #include "pkcs11.h"
@@ -46,7 +46,7 @@ pk11_getKeyFromList(PK11SlotInfo *slot, PRBool needSession)
 {
     PK11SymKey *symKey = NULL;
 
-    PZ_Lock(slot->freeListLock);
+    PR_Lock(slot->freeListLock);
     /* own session list are symkeys with sessions that the symkey owns.
      * 'most' symkeys will own their own session. */
     if (needSession) {
@@ -65,8 +65,12 @@ pk11_getKeyFromList(PK11SlotInfo *slot, PRBool needSession)
             slot->keyCount--;
         }
     }
-    PZ_Unlock(slot->freeListLock);
+    PR_Unlock(slot->freeListLock);
     if (symKey) {
+        /* A key on the free list has been fully released; anything else
+         * means it is still in use somewhere and must not be recycled. */
+        PORT_ReleaseAssert(symKey->refCount == 0);
+        PORT_ReleaseAssert(symKey->slot == NULL);
         symKey->next = NULL;
         if (!needSession) {
             return symKey;
@@ -81,10 +85,11 @@ pk11_getKeyFromList(PK11SlotInfo *slot, PRBool needSession)
         PORT_Assert(symKey->session != CK_INVALID_HANDLE);
         if (symKey->session != CK_INVALID_HANDLE)
             return symKey;
-        PK11_FreeSymKey(symKey);
-        /* if we are here, we need a session, but couldn't get one, it's
-         * unlikely we pk11_GetNewSession will succeed if we call it a second
-         * time. */
+        /* We haven't set this key's reference count yet, so release the
+         * struct directly rather than through PK11_FreeSymKey, which would
+         * drive the count negative and abort. It's unlikely pk11_GetNewSession
+         * will succeed if we call it a second time. */
+        PORT_Free(symKey);
         return NULL;
     }
 
@@ -98,7 +103,7 @@ pk11_getKeyFromList(PK11SlotInfo *slot, PRBool needSession)
         symKey->session = pk11_GetNewSession(slot, &symKey->sessionOwner);
         PORT_Assert(symKey->session != CK_INVALID_HANDLE);
         if (symKey->session == CK_INVALID_HANDLE) {
-            PK11_FreeSymKey(symKey);
+            PORT_Free(symKey);
             symKey = NULL;
         }
     } else {
@@ -183,12 +188,19 @@ PK11_FreeSymKey(PK11SymKey *symKey)
 {
     PK11SlotInfo *slot;
     PRBool freeit = PR_TRUE;
+    PRInt32 newRefCount;
 
     if (!symKey) {
         return;
     }
 
-    if (PR_ATOMIC_DECREMENT(&symKey->refCount) == 0) {
+    newRefCount = PR_ATOMIC_DECREMENT(&symKey->refCount);
+    /* A negative count means this key was already freed (its struct may be
+     * on the slot's free list awaiting reuse). Abort, like an allocator that
+     * detects a double free, before the corrupted struct can be handed out
+     * to a new key. */
+    PORT_ReleaseAssert(newRefCount >= 0);
+    if (newRefCount == 0) {
         PK11SymKey *parent = symKey->parent;
 
         symKey->parent = NULL;
@@ -206,7 +218,7 @@ PK11_FreeSymKey(PK11SymKey *symKey)
             (*symKey->freeFunc)(symKey->userData);
         }
         slot = symKey->slot;
-        PZ_Lock(slot->freeListLock);
+        PR_Lock(slot->freeListLock);
         if (slot->keyCount < slot->maxKeyCount) {
             /*
              * freeSymkeysWithSessionHead contain a list of reusable
@@ -232,7 +244,7 @@ PK11_FreeSymKey(PK11SymKey *symKey)
             symKey->slot = NULL;
             freeit = PR_FALSE;
         }
-        PZ_Unlock(slot->freeListLock);
+        PR_Unlock(slot->freeListLock);
         if (freeit) {
             pk11_CloseSession(symKey->slot, symKey->session,
                               symKey->sessionOwner);
@@ -249,7 +261,10 @@ PK11_FreeSymKey(PK11SymKey *symKey)
 PK11SymKey *
 PK11_ReferenceSymKey(PK11SymKey *symKey)
 {
-    PR_ATOMIC_INCREMENT(&symKey->refCount);
+    PRInt32 newRefCount = PR_ATOMIC_INCREMENT(&symKey->refCount);
+    /* A count of one after incrementing means the key was already freed;
+     * abort before the new reference is used to operate on freed memory. */
+    PORT_ReleaseAssert(newRefCount > 1);
     return symKey;
 }
 
@@ -371,7 +386,10 @@ PK11_GetWrapKey(PK11SlotInfo *slot, int wrap, CK_MECHANISM_TYPE type,
     CK_OBJECT_HANDLE keyHandle;
 
     PK11_EnterSlotMonitor(slot);
-    if (slot->series != series ||
+    /* refKeys is a fixed-size array; bounds-check wrap to match
+     * PK11_SetWrapKey. */
+    if (wrap < 0 || (size_t)wrap >= PR_ARRAY_SIZE(slot->refKeys) ||
+        slot->series != series ||
         slot->refKeys[wrap] == CK_INVALID_HANDLE) {
         PK11_ExitSlotMonitor(slot);
         return NULL;
@@ -437,7 +455,8 @@ PK11_VerifyKeyOK(PK11SymKey *key)
 static PK11SymKey *
 pk11_ImportSymKeyWithTempl(PK11SlotInfo *slot, CK_MECHANISM_TYPE type,
                            PK11Origin origin, PRBool isToken, CK_ATTRIBUTE *keyTemplate,
-                           unsigned int templateCount, SECItem *key, void *wincx)
+                           unsigned int templateCount, unsigned int keyTemplateSize,
+                           SECItem *key, PRBool force, void *wincx)
 {
     PK11SymKey *symKey;
     SECStatus rv;
@@ -449,6 +468,13 @@ pk11_ImportSymKeyWithTempl(PK11SlotInfo *slot, CK_MECHANISM_TYPE type,
 
     symKey->size = key->len;
 
+    PORT_Assert(templateCount < keyTemplateSize);
+    if (templateCount >= keyTemplateSize) {
+        /* we shouldn't get here, but we don't need to crash
+         * on release builds */
+        PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
+        return NULL;
+    }
     PK11_SETATTRS(&keyTemplate[templateCount], CKA_VALUE, key->data, key->len);
     templateCount++;
 
@@ -462,12 +488,81 @@ pk11_ImportSymKeyWithTempl(PK11SlotInfo *slot, CK_MECHANISM_TYPE type,
     /* import the keys */
     rv = PK11_CreateNewObject(slot, symKey->session, keyTemplate,
                               templateCount, isToken, &symKey->objectID);
-    if (rv != SECSuccess) {
+    if (rv == SECSuccess) {
+        return symKey;
+    }
+    /* we failed to create the key, if force isn't set, we just fail now.
+     * An empty key can't be forced either: CKA_VALUE_LEN 0 below would
+     * get the whole seed key rather than no key at all. */
+    if (!force || key->len == 0) {
+        PK11_FreeSymKey(symKey);
+        return NULL;
+    }
+    /* don't bother if the token can't do the mechanisms we need here */
+    CK_MECHANISM_TYPE hmac = CKM_SHA256_HMAC;
+    int hmac_size = 32;
+    if (!PK11_DoesMechanism(slot, PK11_GetKeyGenWithSize(hmac, hmac_size)) ||
+        !PK11_DoesMechanism(slot, CKM_CONCATENATE_DATA_AND_BASE)) {
+        /* Error set by PK11_CreateNewObject */
+        PK11_FreeSymKey(symKey);
+        return NULL;
+    }
+    /* if force is set, we are simulating an unwrap, probably from another
+     * token, we are probably here because we are trying to import into a
+     * FIPS token. Normally we would want this to fail, but the application
+     * got here because they are using unwrap, which is the correct way to
+     * do this, so try to import the key into the FIPS token my hand */
+    /* first generate a seed key */
+    PK11SymKey *seedKey = PK11_KeyGen(slot, hmac, NULL, hmac_size, wincx);
+
+    if (seedKey == NULL) {
         PK11_FreeSymKey(symKey);
         return NULL;
     }
 
-    return symKey;
+    /* now append our key data to the seed key and truncate the seed key */
+    CK_KEY_DERIVATION_STRING_DATA params = { 0 };
+    CK_MECHANISM mechanism = { 0, NULL, 0 };
+    params.pData = key->data;
+    params.ulLen = key->len;
+    mechanism.mechanism = CKM_CONCATENATE_DATA_AND_BASE;
+    mechanism.pParameter = &params;
+    mechanism.ulParameterLen = sizeof(params);
+
+    /* unwrap removed the CKA_VALUE_LEN before it called us, but now we need
+     * it back. We know there is space in the template because unwrap leaves
+     * space for the CKA_VALUE_LEN attribute. Any other callers that set force
+     * should also make sure there is space for the CKA_VALUE_LEN */
+    CK_ULONG valueLen; /* Don't define this in the 'if' statement, because it
+                        * would go out of scope before we use it */
+    if (!pk11_FindAttrInTemplate(keyTemplate, templateCount, CKA_VALUE_LEN)) {
+        /* make sure the template template has the space */
+        PORT_Assert(templateCount < keyTemplateSize);
+        if (templateCount >= keyTemplateSize) {
+            /* we shouldn't get here, but we don't need to crash
+             * on release builds */
+            PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
+            return NULL;
+        }
+        valueLen = (CK_ULONG)key->len;
+        keyTemplate[templateCount].type = CKA_VALUE_LEN;
+        keyTemplate[templateCount].pValue = (void *)&valueLen;
+        keyTemplate[templateCount].ulValueLen = sizeof(valueLen);
+        templateCount++;
+    }
+
+    CK_RV crv = PK11_GETTAB(slot)->C_DeriveKey(symKey->session, &mechanism,
+                                               seedKey->objectID, keyTemplate,
+                                               templateCount,
+                                               &symKey->objectID);
+    PK11_FreeSymKey(seedKey);
+    if (crv == CKR_OK) {
+        return symKey;
+    }
+
+    PORT_SetError(PK11_MapError(crv));
+    PK11_FreeSymKey(symKey);
+    return NULL;
 }
 
 /*
@@ -484,6 +579,7 @@ PK11_ImportSymKey(PK11SlotInfo *slot, CK_MECHANISM_TYPE type,
     CK_BBOOL cktrue = CK_TRUE; /* sigh */
     CK_ATTRIBUTE keyTemplate[5];
     CK_ATTRIBUTE *attrs = keyTemplate;
+    unsigned int keyTemplateSize = PR_ARRAY_SIZE(keyTemplate);
 
     /* CKA_NSS_MESSAGE is a fake operation to distinguish between
      * Normal Encrypt/Decrypt and MessageEncrypt/Decrypt. Don't try to set
@@ -501,11 +597,12 @@ PK11_ImportSymKey(PK11SlotInfo *slot, CK_MECHANISM_TYPE type,
     PK11_SETATTRS(attrs, operation, &cktrue, 1);
     attrs++;
     templateCount = attrs - keyTemplate;
-    PR_ASSERT(templateCount + 1 <= sizeof(keyTemplate) / sizeof(CK_ATTRIBUTE));
+    PR_ASSERT(templateCount + 1 <= keyTemplateSize);
 
     keyType = PK11_GetKeyType(type, key->len);
     symKey = pk11_ImportSymKeyWithTempl(slot, type, origin, PR_FALSE,
-                                        keyTemplate, templateCount, key, wincx);
+                                        keyTemplate, templateCount, keyTemplateSize,
+                                        key, PR_FALSE, wincx);
     return symKey;
 }
 /* Import a PKCS #11 data object and return it as a key. This key is
@@ -525,16 +622,16 @@ PK11_ImportDataKey(PK11SlotInfo *slot, CK_MECHANISM_TYPE type, PK11Origin origin
         return NULL;
     }
     handle = PK11_GetObjectHandle(PK11_TypeGeneric, genObject, NULL);
-    if (handle == CK_INVALID_HANDLE) {
-        return NULL;
-    }
     /* A note about ownership of the PKCS #11 handle:
      * PK11_CreateGenericObject() will not destroy the object it creates
      * on Free, For that you want PK11_CreateManagedGenericObject().
      * Below we import the handle into the symKey structure. We pass
      * PR_TRUE as the owner so that the symKey will destroy the object
-     * once it's freed. This is way it's safe to free now. */
+     * once it's freed. This is why it's safe to destroy genObject now. */
     PK11_DestroyGenericObject(genObject);
+    if (handle == CK_INVALID_HANDLE) {
+        return NULL;
+    }
     return PK11_SymKeyFromHandle(slot, NULL, origin, type, handle, PR_TRUE, wincx);
 }
 
@@ -551,6 +648,7 @@ PK11_ImportSymKeyWithFlags(PK11SlotInfo *slot, CK_MECHANISM_TYPE type,
     CK_BBOOL cktrue = CK_TRUE; /* sigh */
     CK_ATTRIBUTE keyTemplate[MAX_TEMPL_ATTRS];
     CK_ATTRIBUTE *attrs = keyTemplate;
+    unsigned int keyTemplateSize = PR_ARRAY_SIZE(keyTemplate);
 
     /* CKA_NSS_MESSAGE is a fake operation to distinguish between
      * Normal Encrypt/Decrypt and MessageEncrypt/Decrypt. Don't try to set
@@ -580,11 +678,12 @@ PK11_ImportSymKeyWithFlags(PK11SlotInfo *slot, CK_MECHANISM_TYPE type,
         attrs++;
     }
     templateCount = attrs - keyTemplate;
-    PR_ASSERT(templateCount + 1 <= sizeof(keyTemplate) / sizeof(CK_ATTRIBUTE));
+    PR_ASSERT(templateCount + 1 <= keyTemplateSize);
 
     keyType = PK11_GetKeyType(type, key->len);
     symKey = pk11_ImportSymKeyWithTempl(slot, type, origin, isPerm,
-                                        keyTemplate, templateCount, key, wincx);
+                                        keyTemplate, templateCount, keyTemplateSize,
+                                        key, PR_FALSE, wincx);
     if (symKey && isPerm) {
         symKey->owner = PR_FALSE;
     }
@@ -595,17 +694,20 @@ PK11SymKey *
 PK11_FindFixedKey(PK11SlotInfo *slot, CK_MECHANISM_TYPE type, SECItem *keyID,
                   void *wincx)
 {
-    CK_ATTRIBUTE findTemp[4];
+    CK_ATTRIBUTE findTemp[5];
     CK_ATTRIBUTE *attrs;
     CK_BBOOL ckTrue = CK_TRUE;
     CK_OBJECT_CLASS keyclass = CKO_SECRET_KEY;
     size_t tsize = 0;
     CK_OBJECT_HANDLE key_id;
+    CK_KEY_TYPE keyType = PK11_GetKeyType(type, 0);
 
     attrs = findTemp;
     PK11_SETATTRS(attrs, CKA_CLASS, &keyclass, sizeof(keyclass));
     attrs++;
     PK11_SETATTRS(attrs, CKA_TOKEN, &ckTrue, sizeof(ckTrue));
+    attrs++;
+    PK11_SETATTRS(attrs, CKA_KEY_TYPE, &keyType, sizeof(keyType));
     attrs++;
     if (keyID) {
         PK11_SETATTRS(attrs, CKA_ID, keyID->data, keyID->len);
@@ -1237,13 +1339,6 @@ PK11_KeyGenWithTemplate(PK11SlotInfo *slot, CK_MECHANISM_TYPE type,
     return symKey;
 }
 
-/* --- */
-PK11SymKey *
-PK11_GenDES3TokenKey(PK11SlotInfo *slot, SECItem *keyid, void *cx)
-{
-    return PK11_TokenKeyGen(slot, CKM_DES3_CBC, 0, 0, keyid, PR_TRUE, cx);
-}
-
 PK11SymKey *
 PK11_ConvertSessionSymKeyToTokenSymKey(PK11SymKey *symk, void *wincx)
 {
@@ -1681,7 +1776,9 @@ PK11_DeriveWithTemplate(PK11SymKey *baseKey, CK_MECHANISM_TYPE derive,
     PK11SymKey *symKey;
     PK11SymKey *newBaseKey = NULL;
     CK_BBOOL cktrue = CK_TRUE;
-    CK_OBJECT_CLASS keyClass = CKO_SECRET_KEY;
+    /* PKCS #11 Mechanisms v3.0 Sec 2.62.4: CKM_HKDF_DATA output is a CKO_DATA object */
+    PRBool cko_data = (derive == CKM_HKDF_DATA);
+    CK_OBJECT_CLASS keyClass = cko_data ? CKO_DATA : CKO_SECRET_KEY;
     CK_KEY_TYPE keyType = CKK_GENERIC_SECRET;
     CK_ULONG valueLen = 0;
     CK_MECHANISM mechanism;
@@ -1718,7 +1815,8 @@ PK11_DeriveWithTemplate(PK11SymKey *baseKey, CK_MECHANISM_TYPE derive,
         PK11_SETATTRS(attrs, CKA_CLASS, &keyClass, sizeof keyClass);
         attrs++;
     }
-    if (!pk11_FindAttrInTemplate(keyTemplate, numAttrs, CKA_KEY_TYPE)) {
+    /* PKCS #11 v3.0 Sec 4.5.2: Adding CKA_KEY_TYPE to CKO_DATA is invalid */
+    if (!pk11_FindAttrInTemplate(keyTemplate, numAttrs, CKA_KEY_TYPE) && !cko_data) {
         keyType = PK11_GetKeyType(target, keySize);
         PK11_SETATTRS(attrs, CKA_KEY_TYPE, &keyType, sizeof keyType);
         attrs++;
@@ -1729,7 +1827,9 @@ PK11_DeriveWithTemplate(PK11SymKey *baseKey, CK_MECHANISM_TYPE derive,
         PK11_SETATTRS(attrs, CKA_VALUE_LEN, &valueLen, sizeof valueLen);
         attrs++;
     }
-    if ((operation != CKA_FLAGS_ONLY) &&
+    /* PKCS #11 v3.0 Sec 4.5.2: CKO_DATA objects do not support
+     * cryptographic operation flags */
+    if ((operation != CKA_FLAGS_ONLY) && !cko_data &&
         !pk11_FindAttrInTemplate(keyTemplate, numAttrs, operation)) {
         PK11_SETATTRS(attrs, operation, &cktrue, sizeof cktrue);
         attrs++;
@@ -1847,6 +1947,32 @@ pk11_ConcatenateBaseAndKey(PK11SymKey *base,
                        &param, target, operation, keySize);
 }
 
+PK11SymKey *
+PK11_ConcatSymKeys(PK11SymKey *left, PK11SymKey *right, CK_MECHANISM_TYPE target, CK_ATTRIBUTE_TYPE operation)
+{
+    PK11SymKey *out = NULL;
+    PK11SymKey *copyOfLeft = NULL;
+    PK11SymKey *copyOfRight = NULL;
+
+    if ((left == NULL) || (right == NULL)) {
+        PORT_SetError(SEC_ERROR_INVALID_ARGS);
+        return NULL;
+    }
+
+    SECStatus rv = PK11_SymKeysToSameSlot(CKM_CONCATENATE_BASE_AND_KEY,
+                                          CKA_DERIVE, CKA_DERIVE, left, right,
+                                          &copyOfLeft, &copyOfRight);
+    if (rv != SECSuccess) {
+        /* error code already set */
+        return NULL;
+    }
+
+    out = pk11_ConcatenateBaseAndKey(copyOfLeft ? copyOfLeft : left, copyOfRight ? copyOfRight : right, target, operation, 0);
+    PK11_FreeSymKey(copyOfLeft);
+    PK11_FreeSymKey(copyOfRight);
+    return out;
+}
+
 /* Create a new key whose value is the hash of tobehashed.
  * type is the mechanism for the derived key.
  */
@@ -1931,6 +2057,11 @@ pk11_ANSIX963Derive(PK11SymKey *sharedSecret,
         SharedInfoLen = 0;
     else
         SharedInfoLen = sharedData->len;
+
+    if (SharedInfoLen > PR_UINT32_MAX - 4) {
+        PORT_SetError(SEC_ERROR_INVALID_ARGS);
+        return NULL;
+    }
 
     bufferLen = SharedInfoLen + 4;
 
@@ -2070,7 +2201,7 @@ PK11_DerivePubKeyFromPrivKey(SECKEYPrivateKey *privKey)
 /*
  * This Generates a wrapping key based on a privateKey, publicKey, and two
  * random numbers. For Mail usage RandomB should be NULL. In the Sender's
- * case RandomA is generate, outherwize it is passed.
+ * case RandomA is generate, otherwise it is passed.
  */
 PK11SymKey *
 PK11_PubDerive(SECKEYPrivateKey *privKey, SECKEYPublicKey *pubKey,
@@ -2101,13 +2232,6 @@ PK11_PubDerive(SECKEYPrivateKey *privKey, SECKEYPublicKey *pubKey,
     symKey->origin = PK11_OriginDerive;
 
     switch (privKey->keyType) {
-        case rsaKey:
-        case rsaPssKey:
-        case rsaOaepKey:
-        case nullKey:
-            PORT_SetError(SEC_ERROR_BAD_KEY);
-            break;
-        case dsaKey:
         case keaKey:
         case fortezzaKey: {
             static unsigned char rb_email[128] = { 0 };
@@ -2274,6 +2398,11 @@ PK11_PubDerive(SECKEYPrivateKey *privKey, SECKEYPublicKey *pubKey,
                 return symKey;
             PORT_SetError(PK11_MapError(crv));
         }
+        /* most keys are not KEA keys, so assume they are bad if they
+         * are not handled explicitly */
+        default:
+            PORT_SetError(SEC_ERROR_BAD_KEY);
+            break;
     }
 
     PK11_FreeSymKey(symKey);
@@ -2299,6 +2428,7 @@ pk11_ECGetPubkeyEncoding(const SECKEYPublicKey *pubKey)
     if (rv == SECSuccess) {
         SECOidTag tag = SECOID_FindOIDTag(&oid);
         switch (tag) {
+            case SEC_OID_X25519:
             case SEC_OID_CURVE25519:
                 encoding = ECPoint_XOnly;
                 break;
@@ -2355,7 +2485,7 @@ pk11_PubDeriveECKeyWithKDF(
     CK_ATTRIBUTE *attrs = keyTemplate;
     CK_ECDH1_DERIVE_PARAMS *mechParams = NULL;
 
-    if (pubKey->keyType != ecKey) {
+    if (pubKey->keyType != ecKey && pubKey->keyType != ecMontKey) {
         PORT_SetError(SEC_ERROR_BAD_KEY);
         return NULL;
     }
@@ -2406,6 +2536,7 @@ pk11_PubDeriveECKeyWithKDF(
                     key_size = pk11_ECPubKeySize(pubKey);
                     if (key_size == 0) {
                         PK11_FreeSymKey(symKey);
+                        PORT_SetError(SEC_ERROR_INVALID_KEY);
                         return NULL;
                     }
                     break;
@@ -2427,6 +2558,7 @@ pk11_PubDeriveECKeyWithKDF(
                 default:
                     PORT_AssertNotReached("Invalid CKD");
                     PORT_SetError(SEC_ERROR_INVALID_ALGORITHM);
+                    PK11_FreeSymKey(symKey);
                     return NULL;
             }
         }
@@ -2559,15 +2691,13 @@ PK11_PubDeriveWithKDF(SECKEYPrivateKey *privKey, SECKEYPublicKey *pubKey,
 {
 
     switch (privKey->keyType) {
-        case rsaKey:
-        case nullKey:
-        case dsaKey:
         case keaKey:
         case fortezzaKey:
         case dhKey:
             return PK11_PubDerive(privKey, pubKey, isSender, randomA, randomB,
                                   derive, target, operation, keySize, wincx);
         case ecKey:
+        case ecMontKey:
             return pk11_PubDeriveECKeyWithKDF(privKey, pubKey, isSender,
                                               randomA, randomB, derive, target,
                                               operation, keySize,
@@ -2589,7 +2719,8 @@ static PK11SymKey *
 pk11_HandUnwrap(PK11SlotInfo *slot, CK_OBJECT_HANDLE wrappingKey,
                 CK_MECHANISM *mech, SECItem *inKey, CK_MECHANISM_TYPE target,
                 CK_ATTRIBUTE *keyTemplate, unsigned int templateCount,
-                int key_size, void *wincx, CK_RV *crvp, PRBool isPerm)
+                unsigned int keyTemplateSize, int key_size, void *wincx,
+                CK_RV *crvp, PRBool isPerm)
 {
     CK_ULONG len;
     SECItem outKey;
@@ -2603,9 +2734,16 @@ pk11_HandUnwrap(PK11SlotInfo *slot, CK_OBJECT_HANDLE wrappingKey,
         templateCount--;
     }
 
+    if (key_size != 0 && (CK_ULONG)key_size > inKey->len) {
+        PORT_SetError(PK11_MapError(CKR_UNWRAPPING_KEY_SIZE_RANGE));
+        if (crvp)
+            *crvp = CKR_UNWRAPPING_KEY_SIZE_RANGE;
+        return NULL;
+    }
+
     /* keys are almost always aligned, but if we get this far,
      * we've gone above and beyond anyway... */
-    outKey.data = (unsigned char *)PORT_Alloc(inKey->len);
+    outKey.data = (unsigned char *)PORT_ZAlloc(inKey->len);
     if (outKey.data == NULL) {
         PORT_SetError(SEC_ERROR_NO_MEMORY);
         if (crvp)
@@ -2647,8 +2785,9 @@ pk11_HandUnwrap(PK11SlotInfo *slot, CK_OBJECT_HANDLE wrappingKey,
 
     if (PK11_DoesMechanism(slot, target)) {
         symKey = pk11_ImportSymKeyWithTempl(slot, target, PK11_OriginUnwrap,
-                                            isPerm, keyTemplate,
-                                            templateCount, &outKey, wincx);
+                                            isPerm, keyTemplate, templateCount,
+                                            keyTemplateSize, &outKey, PR_TRUE,
+                                            wincx);
     } else {
         slot = PK11_GetBestSlot(target, wincx);
         if (slot == NULL) {
@@ -2659,8 +2798,9 @@ pk11_HandUnwrap(PK11SlotInfo *slot, CK_OBJECT_HANDLE wrappingKey,
             return NULL;
         }
         symKey = pk11_ImportSymKeyWithTempl(slot, target, PK11_OriginUnwrap,
-                                            isPerm, keyTemplate,
-                                            templateCount, &outKey, wincx);
+                                            isPerm, keyTemplate, templateCount,
+                                            keyTemplateSize, &outKey, PR_TRUE,
+                                            wincx);
         PK11_FreeSlot(slot);
     }
     PORT_Free(outKey.data);
@@ -2695,6 +2835,8 @@ pk11_AnyUnwrapKey(PK11SlotInfo *slot, CK_OBJECT_HANDLE wrappingKey,
     CK_ATTRIBUTE keyTemplate[MAX_TEMPL_ATTRS + MAX_ADD_ATTRS];
 #undef MAX_ADD_ATTRS
     CK_ATTRIBUTE *attrs = keyTemplate;
+    unsigned int keyTemplateSize = PR_ARRAY_SIZE(keyTemplate);
+
     unsigned int templateCount;
 
     if (numAttrs > MAX_TEMPL_ATTRS) {
@@ -2744,7 +2886,7 @@ pk11_AnyUnwrapKey(PK11SlotInfo *slot, CK_OBJECT_HANDLE wrappingKey,
     }
 
     templateCount = attrs - keyTemplate;
-    PR_ASSERT(templateCount <= sizeof(keyTemplate) / sizeof(CK_ATTRIBUTE));
+    PR_ASSERT(templateCount <= keyTemplateSize);
 
     /* find out if we can do wrap directly. Because the RSA case if *very*
      * common, cache the results for it. */
@@ -2781,8 +2923,8 @@ pk11_AnyUnwrapKey(PK11SlotInfo *slot, CK_OBJECT_HANDLE wrappingKey,
 
     if ((mechanism_info.flags & CKF_DECRYPT) && !PK11_DoesMechanism(slot, target)) {
         symKey = pk11_HandUnwrap(slot, wrappingKey, &mechanism, wrappedKey,
-                                 target, keyTemplate, templateCount, keySize,
-                                 wincx, &crv, isPerm);
+                                 target, keyTemplate, templateCount,
+                                 keyTemplateSize, keySize, wincx, &crv, isPerm);
         if (symKey) {
             if (param_free)
                 SECITEM_FreeItem(param_free, PR_TRUE);
@@ -2840,7 +2982,8 @@ pk11_AnyUnwrapKey(PK11SlotInfo *slot, CK_OBJECT_HANDLE wrappingKey,
             /* try hand Unwrapping */
             symKey = pk11_HandUnwrap(slot, wrappingKey, &mechanism, wrappedKey,
                                      target, keyTemplate, templateCount,
-                                     keySize, wincx, NULL, isPerm);
+                                     keyTemplateSize, keySize, wincx, NULL,
+                                     isPerm);
         }
     }
 
@@ -3044,4 +3187,329 @@ CK_OBJECT_HANDLE
 PK11_GetSymKeyHandle(PK11SymKey *symKey)
 {
     return symKey->objectID;
+}
+
+SECStatus
+PK11_Encapsulate(SECKEYPublicKey *pubKey, CK_MECHANISM_TYPE target,
+                 PK11AttrFlags attrFlags, CK_FLAGS opFlags,
+                 PK11SymKey **outKey, SECItem **outCiphertext)
+{
+    PORT_Assert(pubKey);
+    PORT_Assert(outKey);
+    PORT_Assert(outCiphertext);
+
+    PK11SlotInfo *slot = pubKey->pkcs11Slot;
+
+    PK11SymKey *sharedSecret = NULL;
+    SECItem *ciphertext = NULL;
+
+    CK_ATTRIBUTE keyTemplate[MAX_TEMPL_ATTRS];
+    unsigned int templateCount;
+
+    CK_ATTRIBUTE *attrs;
+    CK_BBOOL cktrue = CK_TRUE;
+    CK_BBOOL ckfalse = CK_FALSE;
+    CK_OBJECT_CLASS keyClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE keyType = CKK_GENERIC_SECRET;
+    CK_MECHANISM_TYPE kemType = pk11_mapKemKeyType(pubKey->keyType);
+    CK_MECHANISM mech = { kemType, NULL, 0 };
+    CK_ULONG ciphertextLen = 0;
+    CK_RV crv;
+
+    /* set up the target key template */
+    attrs = keyTemplate;
+    PK11_SETATTRS(attrs, CKA_CLASS, &keyClass, sizeof(keyClass));
+    attrs++;
+
+    PK11_SETATTRS(attrs, CKA_KEY_TYPE, &keyType, sizeof(keyType));
+    attrs++;
+
+    attrs += pk11_AttrFlagsToAttributes(attrFlags, attrs, &cktrue, &ckfalse);
+    attrs += pk11_OpFlagsToAttributes(opFlags, attrs, &cktrue);
+
+    templateCount = attrs - keyTemplate;
+    PR_ASSERT(templateCount <= sizeof(keyTemplate) / sizeof(CK_ATTRIBUTE));
+
+    *outKey = NULL;
+    *outCiphertext = NULL;
+
+    if (kemType == CKM_INVALID_MECHANISM) {
+        PORT_SetError(SEC_ERROR_UNSUPPORTED_KEYALG);
+        return SECFailure;
+    }
+
+    if (slot == NULL) {
+        slot = PK11_GetBestSlot(kemType, NULL);
+        if (slot == NULL) {
+            PORT_SetError(SEC_ERROR_NO_MODULE);
+            return SECFailure;
+        }
+        if (PK11_ImportPublicKey(slot, pubKey, PR_FALSE) == CK_INVALID_HANDLE) {
+            PK11_FreeSlot(slot);
+            PORT_SetError(SEC_ERROR_BAD_KEY);
+            return SECFailure;
+        }
+        PK11_FreeSlot(slot); /* pubKey holds a slot reference on success. */
+        slot = pubKey->pkcs11Slot;
+    }
+
+    /* create a struxture for the target key */
+    sharedSecret = pk11_CreateSymKey(slot, target, PR_TRUE, PR_TRUE, NULL);
+    if (sharedSecret == NULL) {
+        PORT_SetError(SEC_ERROR_NO_MEMORY);
+        return SECFailure;
+    }
+    sharedSecret->origin = PK11_OriginDerive;
+
+    /* this path is KEM mechanism agnostic */
+    if (PK11_CheckPKCS11Version(slot, 3, 2, PR_TRUE) >= 0) {
+        pk11_EnterKeyMonitor(sharedSecret);
+        /* get the length the normal PKCS #11 way. This works no matter
+         * what the KEM is and we don't have to try to guess the KEM length
+         * from the key */
+        crv = PK11_GETTAB(slot)->C_EncapsulateKey(sharedSecret->session,
+                                                  &mech,
+                                                  pubKey->pkcs11ID,
+                                                  keyTemplate,
+                                                  templateCount,
+                                                  NULL,
+                                                  &ciphertextLen,
+                                                  &sharedSecret->objectID);
+        pk11_ExitKeyMonitor(sharedSecret);
+        if ((crv != CKR_OK) && (crv != CKR_BUFFER_TOO_SMALL) &&
+            (crv != CKR_KEY_SIZE_RANGE)) {
+            goto loser;
+        }
+        ciphertext = SECITEM_AllocItem(NULL, NULL, ciphertextLen);
+        if (ciphertext == NULL) {
+            crv = CKR_HOST_MEMORY;
+            goto loser;
+        }
+        pk11_EnterKeyMonitor(sharedSecret);
+        /* Now do the encapsulate */
+        /* NOTE: the PKCS #11 order of the parameters is different from
+         * the vendor interface */
+        crv = PK11_GETTAB(slot)->C_EncapsulateKey(sharedSecret->session,
+                                                  &mech,
+                                                  pubKey->pkcs11ID,
+                                                  keyTemplate,
+                                                  templateCount,
+                                                  ciphertext->data,
+                                                  &ciphertextLen,
+                                                  &sharedSecret->objectID);
+        pk11_ExitKeyMonitor(sharedSecret);
+        if (crv != CKR_OK) {
+            goto loser;
+        }
+        ciphertext->len = ciphertextLen;
+    } else {
+        /* use the old NSS private interface */
+        CK_INTERFACE_PTR KEMInterface = NULL;
+        CK_UTF8CHAR_PTR KEMInterfaceName =
+            (CK_UTF8CHAR_PTR) "Vendor NSS KEM Interface";
+        CK_VERSION KEMInterfaceVersion = { 1, 0 };
+        CK_NSS_KEM_FUNCTIONS *KEMInterfaceFunctions = NULL;
+        CK_NSS_KEM_PARAMETER_SET_TYPE kemParameterSet;
+
+        crv = PK11_GETTAB(slot)->C_GetInterface(KEMInterfaceName,
+                                                &KEMInterfaceVersion,
+                                                &KEMInterface, 0);
+        if (crv != CKR_OK) {
+            goto loser;
+        }
+        KEMInterfaceFunctions = (CK_NSS_KEM_FUNCTIONS *)(KEMInterface->pFunctionList);
+
+        /* the old API expected the parameter set as a parameter, the
+         * pkcs11 v3.2 gets it from the key */
+        kemParameterSet = PK11_ReadULongAttribute(slot,
+                                                  pubKey->pkcs11ID,
+                                                  CKA_NSS_PARAMETER_SET);
+        if (kemParameterSet == CK_UNAVAILABLE_INFORMATION) {
+            kemParameterSet = PK11_ReadULongAttribute(slot,
+                                                      pubKey->pkcs11ID,
+                                                      CKA_PARAMETER_SET);
+            if (kemParameterSet == CK_UNAVAILABLE_INFORMATION) {
+                crv = CKR_PUBLIC_KEY_INVALID;
+                goto loser;
+            }
+        }
+        /* The old interface only ever supported KYBER768 and MLKEM768
+         * SOME versions of RHEL has MLKEM1024  support, if we want to
+         * make sure this works with those versions of softoken (without their
+         * NSS) we should check the kemParamSet and set the mech to
+         * CKM_NSS_ML_KEM if the key isn't KYBER and the cipher test to
+         * MLKEM104_CIPHERTEXT_BYTES if the kemParmset is MLKEM1024 */
+        mech.mechanism = CKM_NSS_KYBER;
+        mech.pParameter = (CK_VOID_PTR)&kemParameterSet;
+        mech.ulParameterLen = sizeof(kemParameterSet);
+        ciphertextLen = KYBER768_CIPHERTEXT_BYTES;
+
+        ciphertext = SECITEM_AllocItem(NULL, NULL, ciphertextLen);
+        if (ciphertext == NULL) {
+            crv = CKR_HOST_MEMORY;
+            goto loser;
+        }
+
+        pk11_EnterKeyMonitor(sharedSecret);
+        crv = KEMInterfaceFunctions->C_Encapsulate(sharedSecret->session,
+                                                   &mech,
+                                                   pubKey->pkcs11ID,
+                                                   keyTemplate,
+                                                   templateCount,
+                                                   &sharedSecret->objectID,
+                                                   ciphertext->data,
+                                                   &ciphertextLen);
+        pk11_ExitKeyMonitor(sharedSecret);
+        if (crv != CKR_OK) {
+            goto loser;
+        }
+
+        PORT_Assert(ciphertextLen == ciphertext->len);
+    }
+
+    *outKey = sharedSecret;
+    *outCiphertext = ciphertext;
+
+    return SECSuccess;
+
+loser:
+    PK11_FreeSymKey(sharedSecret);
+    SECITEM_FreeItem(ciphertext, PR_TRUE);
+    PORT_SetError(PK11_MapError(crv));
+    return SECFailure;
+}
+
+SECStatus
+PK11_Decapsulate(SECKEYPrivateKey *privKey, const SECItem *ciphertext,
+                 CK_MECHANISM_TYPE target, PK11AttrFlags attrFlags,
+                 CK_FLAGS opFlags, PK11SymKey **outKey)
+{
+    PORT_Assert(privKey);
+    PORT_Assert(ciphertext);
+    PORT_Assert(outKey);
+
+    PK11SlotInfo *slot = privKey->pkcs11Slot;
+
+    PK11SymKey *sharedSecret;
+
+    CK_ATTRIBUTE keyTemplate[MAX_TEMPL_ATTRS];
+    unsigned int templateCount;
+
+    CK_ATTRIBUTE *attrs;
+    CK_BBOOL cktrue = CK_TRUE;
+    CK_BBOOL ckfalse = CK_FALSE;
+    CK_OBJECT_CLASS keyClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE keyType = CKK_GENERIC_SECRET;
+    CK_MECHANISM_TYPE kemType = pk11_mapKemKeyType(privKey->keyType);
+    CK_MECHANISM mech = { kemType, NULL, 0 };
+
+    CK_RV crv;
+
+    *outKey = NULL;
+
+    if (kemType == CKM_INVALID_MECHANISM) {
+        PORT_SetError(SEC_ERROR_UNSUPPORTED_KEYALG);
+        return SECFailure;
+    }
+    if (slot == NULL) {
+        PORT_SetError(SEC_ERROR_INVALID_ARGS);
+        return SECFailure;
+    }
+
+    sharedSecret = pk11_CreateSymKey(slot, target, PR_TRUE, PR_TRUE, NULL);
+    if (sharedSecret == NULL) {
+        PORT_SetError(SEC_ERROR_NO_MEMORY);
+        return SECFailure;
+    }
+    sharedSecret->origin = PK11_OriginUnwrap;
+
+    attrs = keyTemplate;
+    PK11_SETATTRS(attrs, CKA_CLASS, &keyClass, sizeof(keyClass));
+    attrs++;
+
+    PK11_SETATTRS(attrs, CKA_KEY_TYPE, &keyType, sizeof(keyType));
+    attrs++;
+
+    attrs += pk11_AttrFlagsToAttributes(attrFlags, attrs, &cktrue, &ckfalse);
+    attrs += pk11_OpFlagsToAttributes(opFlags, attrs, &cktrue);
+
+    templateCount = attrs - keyTemplate;
+    PR_ASSERT(templateCount <= sizeof(keyTemplate) / sizeof(CK_ATTRIBUTE));
+
+    if (PK11_CheckPKCS11Version(slot, 3, 2, PR_TRUE) >= 0) {
+        pk11_EnterKeyMonitor(sharedSecret);
+        crv = PK11_GETTAB(slot)->C_DecapsulateKey(sharedSecret->session,
+                                                  &mech,
+                                                  privKey->pkcs11ID,
+                                                  keyTemplate,
+                                                  templateCount,
+                                                  ciphertext->data,
+                                                  ciphertext->len,
+                                                  &sharedSecret->objectID);
+        pk11_ExitKeyMonitor(sharedSecret);
+        if (crv != CKR_OK) {
+            goto loser;
+        }
+    } else {
+        CK_INTERFACE_PTR KEMInterface = NULL;
+        CK_UTF8CHAR_PTR KEMInterfaceName =
+            (CK_UTF8CHAR_PTR) "Vendor NSS KEM Interface";
+        CK_VERSION KEMInterfaceVersion = { 1, 0 };
+        CK_NSS_KEM_FUNCTIONS *KEMInterfaceFunctions = NULL;
+
+        crv = PK11_GETTAB(slot)->C_GetInterface(KEMInterfaceName,
+                                                &KEMInterfaceVersion,
+                                                &KEMInterface, 0);
+        if (crv != CKR_OK) {
+            PORT_SetError(PK11_MapError(crv));
+            goto loser;
+        }
+        KEMInterfaceFunctions =
+            (CK_NSS_KEM_FUNCTIONS *)(KEMInterface->pFunctionList);
+
+        /* the old API expected the parameter set as a parameter, the
+         * pkcs11 v3.2 gets it from the key */
+        CK_ULONG kemParameterSet = PK11_ReadULongAttribute(slot,
+                                                           privKey->pkcs11ID,
+                                                           CKA_NSS_PARAMETER_SET);
+        if (kemParameterSet == CK_UNAVAILABLE_INFORMATION) {
+            kemParameterSet = PK11_ReadULongAttribute(slot,
+                                                      privKey->pkcs11ID,
+                                                      CKA_PARAMETER_SET);
+            if (kemParameterSet == CK_UNAVAILABLE_INFORMATION) {
+                crv = CKR_KEY_HANDLE_INVALID;
+                goto loser;
+            }
+        }
+        /* The old interface only ever supported KYBER768 and MLKEM768
+         * SOME versions of RHEL has MLKEM1024  support, if we want to
+         * make sure this works with those versions of softoken (without their
+         * NSS) we should check the kemParamSet and set the mech to
+         * CKM_NSS_ML_KEM if the key isn't KYBER and the cipher test to
+         * MLKEM104_CIPHERTEXT_BYTES if the kemParmset is MLKEM1024 */
+        mech.mechanism = CKM_NSS_KYBER;
+        mech.pParameter = (CK_VOID_PTR)&kemParameterSet;
+        mech.ulParameterLen = sizeof(kemParameterSet);
+
+        pk11_EnterKeyMonitor(sharedSecret);
+        crv = KEMInterfaceFunctions->C_Decapsulate(sharedSecret->session,
+                                                   &mech,
+                                                   privKey->pkcs11ID,
+                                                   ciphertext->data,
+                                                   ciphertext->len,
+                                                   keyTemplate,
+                                                   templateCount,
+                                                   &sharedSecret->objectID);
+        pk11_ExitKeyMonitor(sharedSecret);
+        if (crv != CKR_OK) {
+            goto loser;
+        }
+    }
+
+    *outKey = sharedSecret;
+    return SECSuccess;
+
+loser:
+    PK11_FreeSymKey(sharedSecret);
+    return SECFailure;
 }

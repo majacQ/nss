@@ -38,7 +38,7 @@ SSL_IMPORT const PRUint16 SSL_NumImplementedCiphers;
 SSL_IMPORT PRUint16 SSL_GetNumImplementedCiphers(void);
 
 /* Macro to tell which ciphers in table are SSL2 vs SSL3/TLS. */
-#define SSL_IS_SSL2_CIPHER(which) (((which)&0xfff0) == 0xff00)
+#define SSL_IS_SSL2_CIPHER(which) (((which) & 0xfff0) == 0xff00)
 
 /*
 ** Imports fd into SSL, returning a new socket.  Copies SSL configuration
@@ -238,8 +238,10 @@ SSL_IMPORT PRFileDesc *DTLS_ImportFD(PRFileDesc *model, PRFileDesc *fd);
  * the rest of the TLS data. See [draft-ietf-tls-tls13; Section 8]
  * for more details.
  *
- * Note: when DTLS 1.3 is in use, any 0-RTT data received after EndOfEarlyData
- * (e.g., because of reordering) is discarded.
+ * Note: DTLS 1.3 does not use EndOfEarlyData.  A server instead stops
+ * accepting 0-RTT data once it receives a record from the handshake epoch, so
+ * any 0-RTT data that arrives after that (e.g., because of reordering) is
+ * discarded.
  */
 #define SSL_ENABLE_0RTT_DATA 33
 
@@ -379,6 +381,12 @@ SSL_IMPORT PRFileDesc *DTLS_ImportFD(PRFileDesc *model, PRFileDesc *fd);
  * (which MUST be last) will be sent in randomly shuffeld order.
  */
 #define SSL_ENABLE_CH_EXTENSION_PERMUTATION 43
+
+/* Import the peer certificate chain into the database before the
+ * authCertificate callback is invoked for certificate validation.
+ * This behavior is enabled by default.
+ */
+#define SSL_DB_LOAD_CERTIFICATE_CHAIN 44
 
 #ifdef SSL_DEPRECATED_FUNCTION
 /* Old deprecated function names */
@@ -736,7 +744,7 @@ SSL_IMPORT SECStatus SSL_ForceHandshake(PRFileDesc *fd);
 
 /*
 ** Same as above, but with an I/O timeout.
- */
+*/
 SSL_IMPORT SECStatus SSL_ForceHandshakeWithTimeout(PRFileDesc *fd,
                                                    PRIntervalTime timeout);
 
@@ -985,7 +993,7 @@ SSL_IMPORT SECStatus SSL_SetPKCS11PinArg(PRFileDesc *fd, void *a);
 
 /*
 ** These are callbacks for dealing with SSL alerts.
- */
+*/
 
 typedef PRUint8 SSLAlertLevel;
 typedef PRUint8 SSLAlertDescription;
@@ -1226,7 +1234,7 @@ SSL_IMPORT SECStatus SSL_ReHandshake(PRFileDesc *fd, PRBool flushCache);
 
 /*
 ** Same as above, but with an I/O timeout.
- */
+*/
 SSL_IMPORT SECStatus SSL_ReHandshakeWithTimeout(PRFileDesc *fd,
                                                 PRBool flushCache,
                                                 PRIntervalTime timeout);
@@ -1387,6 +1395,13 @@ SSL_IMPORT SSL3Statistics *SSL_GetStatistics(void);
  * client - when the second flight of messages have been sent.  This function
  * therefore produces unreliable results prior to receiving the
  * SSLHandshakeCallback or the SSLCanFalseStartCallback.
+ *
+ * This may be called from any thread, including while another thread is
+ * performing I/O on the same socket.  The fields are not captured atomically,
+ * however: if the peer replaces the session concurrently - by renegotiating,
+ * or by sending a new session ticket - the returned values can mix state from
+ * before and after that change.  Call this from a callback, or from the thread
+ * driving the handshake, if a coherent snapshot is required.
  */
 SSL_IMPORT SECStatus SSL_GetChannelInfo(PRFileDesc *fd, SSLChannelInfo *info,
                                         PRUintn len);
@@ -1400,6 +1415,9 @@ SSL_IMPORT SECStatus SSL_GetChannelInfo(PRFileDesc *fd, SSLChannelInfo *info,
  * SSLSNISocketConfig, and other callbacks that might be called during the
  * processing of the first flight of client of server handshake messages.
  * Values are marked as being unavailable when renegotiation is initiated.
+ *
+ * As with SSL_GetChannelInfo, this may be called from any thread, and the
+ * fields are not captured atomically.
  */
 SSL_IMPORT SECStatus
 SSL_GetPreliminaryChannelInfo(PRFileDesc *fd,
@@ -1566,7 +1584,7 @@ SSL_IMPORT SECStatus SSL_AuthCertificateComplete(PRFileDesc *fd,
  *  - a valid SECKEYPrivateKey located at *clientPrivateKey
  *  - a valid CERTCertificate located at *clientCertificate
  * The ownership of these latter structures will pass to NSS and the application
- * MUST not retain any references to them or invalidate them. 
+ * MUST not retain any references to them or invalidate them.
  *
  * If a certificate has not been selected, the application must call
  * SSL_ClientCertCallbackComplete with:

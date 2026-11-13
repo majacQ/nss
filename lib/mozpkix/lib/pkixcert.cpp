@@ -22,6 +22,7 @@
  * limitations under the License.
  */
 
+#include "mozpkix/pkix.h"
 #include "mozpkix/pkixutil.h"
 
 namespace mozilla { namespace pkix {
@@ -38,8 +39,8 @@ BackCert::Init()
 
   Reader tbsCertificate;
 
-  // The scope of |input| and |certificate| are limited to this block so we
-  // don't accidentally confuse them for tbsCertificate later.
+  // The scope of |certificate| is limited to this block so we
+  // don't accidentally confuse it for tbsCertificate later.
   {
     Reader certificate;
     rv = der::ExpectTagAndGetValueAtEnd(der, der::SEQUENCE, certificate);
@@ -165,6 +166,19 @@ BackCert::Init()
 }
 
 Result
+FindSubjectPublicKeyInfo(Input certDER, /*out*/ Input& subjectPublicKeyInfo)
+{
+  // BackCert::Init doesn't depend on the end-entity/CA distinction or on the
+  // child certificate, so these don't matter here.
+  BackCert cert(certDER, EndEntityOrCA::MustBeEndEntity, nullptr);
+  Result rv = cert.Init();
+  if (rv != Success) {
+    return rv;
+  }
+  return subjectPublicKeyInfo.Init(cert.GetSubjectPublicKeyInfo());
+}
+
+Result
 BackCert::RememberExtension(Reader& extnID, Input extnValue,
                             bool critical, /*out*/ bool& understood)
 {
@@ -223,6 +237,10 @@ BackCert::RememberExtension(Reader& extnID, Input extnValue,
   static const uint8_t id_embeddedSctList[] = {
     0x2b, 0x06, 0x01, 0x04, 0x01, 0xd6, 0x79, 0x02, 0x04, 0x02
   };
+  // python DottedOIDToCode.py id-pe-qcStatements 1.3.6.1.5.5.7.1.3
+  static const uint8_t id_pe_qcStatements[] = {
+    0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x01, 0x03
+  };
 
   Input* out = nullptr;
 
@@ -271,6 +289,8 @@ BackCert::RememberExtension(Reader& extnID, Input extnValue,
     out = &requiredTLSFeatures;
   } else if (extnID.MatchRest(id_embeddedSctList)) {
     out = &signedCertificateTimestamps;
+  } else if (extnID.MatchRest(id_pe_qcStatements)) {
+    out = &qcStatements;
   } else if (extnID.MatchRest(id_pkix_ocsp_nocheck) && critical) {
     // We need to make sure we don't reject delegated OCSP response signing
     // certificates that contain the id-pkix-ocsp-nocheck extension marked as

@@ -16,7 +16,7 @@ namespace nss_test {
 class SoftokenBuiltinsTest : public ::testing::Test {
  protected:
   SoftokenBuiltinsTest() : nss_db_dir_("SoftokenBuiltinsTest.d-") {}
-  SoftokenBuiltinsTest(const std::string &prefix) : nss_db_dir_(prefix) {}
+  SoftokenBuiltinsTest(const std::string& prefix) : nss_db_dir_(prefix) {}
 
   virtual void SetUp() {
     std::string nss_init_arg("sql:");
@@ -27,7 +27,7 @@ class SoftokenBuiltinsTest : public ::testing::Test {
 
   virtual void TearDown() {
     ASSERT_EQ(SECSuccess, NSS_Shutdown());
-    const std::string &nss_db_dir_path = nss_db_dir_.GetPath();
+    const std::string& nss_db_dir_path = nss_db_dir_.GetPath();
     ASSERT_EQ(0, unlink((nss_db_dir_path + "/cert9.db").c_str()));
     ASSERT_EQ(0, unlink((nss_db_dir_path + "/key4.db").c_str()));
     ASSERT_EQ(0, unlink((nss_db_dir_path + "/pkcs11.txt").c_str()));
@@ -48,11 +48,11 @@ class SoftokenBuiltinsTest : public ::testing::Test {
 // The next tests in this class are used to test the Distrust Fields.
 // More details about these fields in lib/ckfw/builtins/README.
 TEST_F(SoftokenBuiltinsTest, CheckNoDistrustFields) {
-  const char *kCertNickname =
+  const char* kCertNickname =
       "Builtin Object Token:Distrust Fields Test - no_distrust";
   LoadModule();
 
-  CERTCertDBHandle *cert_handle = CERT_GetDefaultCertDB();
+  CERTCertDBHandle* cert_handle = CERT_GetDefaultCertDB();
   ASSERT_TRUE(cert_handle);
   ScopedCERTCertificate cert(
       CERT_FindCertByNickname(cert_handle, kCertNickname));
@@ -64,22 +64,38 @@ TEST_F(SoftokenBuiltinsTest, CheckNoDistrustFields) {
   EXPECT_EQ(PR_FALSE,
             PK11_HasAttributeSet(cert->slot, cert->pkcs11ID,
                                  CKA_NSS_EMAIL_DISTRUST_AFTER, PR_FALSE));
+
+  SECStatus rv;
+  PRBool isDistrusted;
+  PRTime distrustAfter;
+  rv = PK11_ReadDistrustAfterAttribute(cert->slot, cert->pkcs11ID,
+                                       CKA_NSS_SERVER_DISTRUST_AFTER,
+                                       &isDistrusted, &distrustAfter);
+  EXPECT_EQ(SECSuccess, rv);
+  EXPECT_EQ(PR_FALSE, isDistrusted);
+
+  rv = PK11_ReadDistrustAfterAttribute(cert->slot, cert->pkcs11ID,
+                                       CKA_NSS_EMAIL_DISTRUST_AFTER,
+                                       &isDistrusted, &distrustAfter);
+  EXPECT_EQ(SECSuccess, rv);
+  EXPECT_EQ(PR_FALSE, isDistrusted);
+
   ASSERT_FALSE(cert->distrust);
 }
 
 TEST_F(SoftokenBuiltinsTest, CheckOkDistrustFields) {
-  const char *kCertNickname =
+  const char* kCertNickname =
       "Builtin Object Token:Distrust Fields Test - ok_distrust";
   LoadModule();
 
-  CERTCertDBHandle *cert_handle = CERT_GetDefaultCertDB();
+  CERTCertDBHandle* cert_handle = CERT_GetDefaultCertDB();
   ASSERT_TRUE(cert_handle);
   ScopedCERTCertificate cert(
       CERT_FindCertByNickname(cert_handle, kCertNickname));
   ASSERT_TRUE(cert);
 
-  const char *kExpectedDERValueServer = "200617000000Z";
-  const char *kExpectedDERValueEmail = "071014085320Z";
+  const char* kExpectedDERValueServer = "200617000000Z";
+  const char* kExpectedDERValueEmail = "071014085320Z";
   // When a valid timestamp is encoded, the result length is exactly 13.
   const unsigned int kDistrustFieldSize = 13;
 
@@ -95,14 +111,31 @@ TEST_F(SoftokenBuiltinsTest, CheckOkDistrustFields) {
   EXPECT_TRUE(!memcmp(kExpectedDERValueEmail,
                       cert->distrust->emailDistrustAfter.data,
                       kDistrustFieldSize));
+
+  SECStatus rv;
+  PRBool isDistrusted;
+  PRTime distrustAfter;
+  rv = PK11_ReadDistrustAfterAttribute(cert->slot, cert->pkcs11ID,
+                                       CKA_NSS_SERVER_DISTRUST_AFTER,
+                                       &isDistrusted, &distrustAfter);
+  EXPECT_EQ(SECSuccess, rv);
+  EXPECT_EQ(PR_TRUE, isDistrusted);
+  EXPECT_EQ(1592352000000000, distrustAfter);
+
+  rv = PK11_ReadDistrustAfterAttribute(cert->slot, cert->pkcs11ID,
+                                       CKA_NSS_EMAIL_DISTRUST_AFTER,
+                                       &isDistrusted, &distrustAfter);
+  EXPECT_EQ(SECSuccess, rv);
+  EXPECT_EQ(PR_TRUE, isDistrusted);
+  EXPECT_EQ(1192352000000000, distrustAfter);
 }
 
 TEST_F(SoftokenBuiltinsTest, CheckInvalidDistrustFields) {
-  const char *kCertNickname =
+  const char* kCertNickname =
       "Builtin Object Token:Distrust Fields Test - err_distrust";
   LoadModule();
 
-  CERTCertDBHandle *cert_handle = CERT_GetDefaultCertDB();
+  CERTCertDBHandle* cert_handle = CERT_GetDefaultCertDB();
   ASSERT_TRUE(cert_handle);
   ScopedCERTCertificate cert(
       CERT_FindCertByNickname(cert_handle, kCertNickname));
@@ -119,6 +152,19 @@ TEST_F(SoftokenBuiltinsTest, CheckInvalidDistrustFields) {
             PK11_HasAttributeSet(cert->slot, cert->pkcs11ID,
                                  CKA_NSS_EMAIL_DISTRUST_AFTER, PR_FALSE));
   ASSERT_FALSE(cert->distrust);
+
+  SECStatus rv;
+  PRBool isDistrusted;
+  PRTime distrustAfter;
+  rv = PK11_ReadDistrustAfterAttribute(cert->slot, cert->pkcs11ID,
+                                       CKA_NSS_SERVER_DISTRUST_AFTER,
+                                       &isDistrusted, &distrustAfter);
+  EXPECT_EQ(SECFailure, rv);
+
+  rv = PK11_ReadDistrustAfterAttribute(cert->slot, cert->pkcs11ID,
+                                       CKA_NSS_EMAIL_DISTRUST_AFTER,
+                                       &isDistrusted, &distrustAfter);
+  EXPECT_EQ(SECFailure, rv);
 }
 
 }  // namespace nss_test

@@ -49,10 +49,10 @@ extern "C" {
 #endif
 
 struct dirent {
-#if defined(OS2) || defined(WIN32) /* use the layout of EMX to avoid trouble */
-    int d_ino;                     /* Dummy */
-    int d_reclen;                  /* Dummy, same as d_namlen */
-    int d_namlen;                  /* length of name */
+#if defined(WIN32) /* use the layout of EMX to avoid trouble */
+    int d_ino;     /* Dummy */
+    int d_reclen;  /* Dummy, same as d_namlen */
+    int d_namlen;  /* length of name */
     char d_name[MAXNAMLEN + 1];
     unsigned long d_size;
     unsigned short d_attribute; /* attributes (see above) */
@@ -83,11 +83,11 @@ extern char *abs_path(const char *name, char *buffer, int len);
 #endif
 
 #ifndef S_ISDIR
-#define S_ISDIR(m) (((m)&S_IFMT) == S_IFDIR)
+#define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
 #endif
 
 #ifndef S_ISREG
-#define S_ISREG(m) (((m)&S_IFMT) == S_IFREG)
+#define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
 #endif
 
 #ifdef __cplusplus

@@ -23,6 +23,7 @@ SEC_ASN1_MKSUB(CERT_SetOfSignedCrlTemplate)
 SEC_ASN1_MKSUB(SECOID_AlgorithmIDTemplate)
 SEC_ASN1_MKSUB(SEC_BitStringTemplate)
 SEC_ASN1_MKSUB(SEC_OctetStringTemplate)
+SEC_ASN1_MKSUB(SEC_GeneralizedTimeTemplate)
 SEC_ASN1_MKSUB(SEC_PointerToOctetStringTemplate)
 SEC_ASN1_MKSUB(SEC_SetOfAnyTemplate)
 
@@ -208,6 +209,40 @@ const SEC_ASN1Template NSS_PointerToCMSEnvelopedDataTemplate[] = {
     { SEC_ASN1_POINTER, 0, NSSCMSEnvelopedDataTemplate }
 };
 
+/* -----------------------------------------------------------------------------
+ * AUTHENTICATED ENVELOPED DATA (RFC 5083)
+ */
+const SEC_ASN1Template NSSCMSAuthEnvelopedDataTemplate[] = {
+    { SEC_ASN1_SEQUENCE | SEC_ASN1_MAY_STREAM,
+      0, NULL, sizeof(NSSCMSAuthEnvelopedData) },
+    { SEC_ASN1_INTEGER,
+      offsetof(NSSCMSAuthEnvelopedData, version) },
+    { SEC_ASN1_OPTIONAL | SEC_ASN1_POINTER | SEC_ASN1_CONSTRUCTED |
+          SEC_ASN1_CONTEXT_SPECIFIC | 0,
+      offsetof(NSSCMSAuthEnvelopedData, originatorInfo),
+      NSSCMSOriginatorInfoTemplate },
+    { SEC_ASN1_SET_OF,
+      offsetof(NSSCMSAuthEnvelopedData, recipientInfos),
+      NSSCMSRecipientInfoTemplate },
+    { SEC_ASN1_INLINE,
+      offsetof(NSSCMSAuthEnvelopedData, contentInfo),
+      NSSCMSEncryptedContentInfoTemplate },
+    { SEC_ASN1_OPTIONAL | SEC_ASN1_CONSTRUCTED | SEC_ASN1_CONTEXT_SPECIFIC | 1,
+      offsetof(NSSCMSAuthEnvelopedData, authAttrs),
+      nss_cms_set_of_attribute_template },
+    { SEC_ASN1_OCTET_STRING | SEC_ASN1_XTRN,
+      offsetof(NSSCMSAuthEnvelopedData, mac),
+      SEC_ASN1_SUB(SEC_OctetStringTemplate) },
+    { SEC_ASN1_OPTIONAL | SEC_ASN1_CONSTRUCTED | SEC_ASN1_CONTEXT_SPECIFIC | 2,
+      offsetof(NSSCMSAuthEnvelopedData, unauthAttrs),
+      nss_cms_set_of_attribute_template },
+    { 0 }
+};
+
+const SEC_ASN1Template NSS_PointerToCMSAuthEnvelopedDataTemplate[] = {
+    { SEC_ASN1_POINTER, 0, NSSCMSAuthEnvelopedDataTemplate }
+};
+
 /* here come the 15 gazillion templates for all the v3 varieties of RecipientInfo */
 
 /* -----------------------------------------------------------------------------
@@ -269,27 +304,45 @@ static const SEC_ASN1Template NSSCMSOriginatorIdentifierOrKeyTemplate[] = {
       offsetof(NSSCMSOriginatorIdentifierOrKey, id.issuerAndSN),
       SEC_ASN1_SUB(CERT_IssuerAndSNTemplate),
       NSSCMSOriginatorIDOrKey_IssuerSN },
-    { SEC_ASN1_EXPLICIT | SEC_ASN1_CONSTRUCTED | SEC_ASN1_CONTEXT_SPECIFIC |
-          SEC_ASN1_XTRN | 1,
+    { SEC_ASN1_POINTER | SEC_ASN1_CONTEXT_SPECIFIC | SEC_ASN1_XTRN | 0,
       offsetof(NSSCMSOriginatorIdentifierOrKey, id.subjectKeyID),
-      SEC_ASN1_SUB(SEC_PointerToOctetStringTemplate),
+      SEC_ASN1_SUB(SEC_OctetStringTemplate),
       NSSCMSOriginatorIDOrKey_SubjectKeyID },
-    { SEC_ASN1_EXPLICIT | SEC_ASN1_CONSTRUCTED | SEC_ASN1_CONTEXT_SPECIFIC | 2,
+    { SEC_ASN1_CONSTRUCTED | SEC_ASN1_CONTEXT_SPECIFIC | 1,
       offsetof(NSSCMSOriginatorIdentifierOrKey, id.originatorPublicKey),
       NSSCMSOriginatorPublicKeyTemplate,
       NSSCMSOriginatorIDOrKey_OriginatorPublicKey },
     { 0 }
 };
 
+const SEC_ASN1Template NSSCMSOtherKeyAttributeTemplate[] = {
+    { SEC_ASN1_SEQUENCE,
+      0, NULL, sizeof(NSSCMSOtherKeyAttribute) },
+    {
+        SEC_ASN1_OBJECT_ID,
+        offsetof(NSSCMSOtherKeyAttribute, keyAttrId),
+    },
+    {
+        SEC_ASN1_OPTIONAL | SEC_ASN1_ANY,
+        offsetof(NSSCMSOtherKeyAttribute, keyAttr),
+    },
+    {
+        0,
+    }
+};
+
 const SEC_ASN1Template NSSCMSRecipientKeyIdentifierTemplate[] = {
     { SEC_ASN1_SEQUENCE,
       0, NULL, sizeof(NSSCMSRecipientKeyIdentifier) },
-    { SEC_ASN1_OCTET_STRING,
-      offsetof(NSSCMSRecipientKeyIdentifier, subjectKeyIdentifier) },
-    { SEC_ASN1_OPTIONAL | SEC_ASN1_OCTET_STRING,
-      offsetof(NSSCMSRecipientKeyIdentifier, date) },
-    { SEC_ASN1_OPTIONAL | SEC_ASN1_OCTET_STRING,
-      offsetof(NSSCMSRecipientKeyIdentifier, other) },
+    { SEC_ASN1_POINTER | SEC_ASN1_XTRN,
+      offsetof(NSSCMSRecipientKeyIdentifier, subjectKeyIdentifier),
+      SEC_ASN1_SUB(SEC_OctetStringTemplate) },
+    { SEC_ASN1_OPTIONAL | SEC_ASN1_POINTER | SEC_ASN1_XTRN,
+      offsetof(NSSCMSRecipientKeyIdentifier, date),
+      SEC_ASN1_SUB(SEC_GeneralizedTimeTemplate) },
+    { SEC_ASN1_OPTIONAL | SEC_ASN1_POINTER | SEC_ASN1_XTRN,
+      offsetof(NSSCMSRecipientKeyIdentifier, other),
+      NSSCMSOtherKeyAttributeTemplate },
     { 0 }
 };
 
@@ -316,7 +369,7 @@ static const SEC_ASN1Template NSSCMSRecipientEncryptedKeyTemplate[] = {
       NSSCMSKeyAgreeRecipientIdentifierTemplate },
     { SEC_ASN1_INLINE | SEC_ASN1_XTRN,
       offsetof(NSSCMSRecipientEncryptedKey, encKey),
-      SEC_ASN1_SUB(SEC_BitStringTemplate) },
+      SEC_ASN1_SUB(SEC_OctetStringTemplate) },
     { 0 }
 };
 
@@ -350,10 +403,12 @@ static const SEC_ASN1Template NSSCMSKEKIdentifierTemplate[] = {
       0, NULL, sizeof(NSSCMSKEKIdentifier) },
     { SEC_ASN1_OCTET_STRING,
       offsetof(NSSCMSKEKIdentifier, keyIdentifier) },
-    { SEC_ASN1_OPTIONAL | SEC_ASN1_OCTET_STRING,
-      offsetof(NSSCMSKEKIdentifier, date) },
-    { SEC_ASN1_OPTIONAL | SEC_ASN1_OCTET_STRING,
-      offsetof(NSSCMSKEKIdentifier, other) },
+    { SEC_ASN1_OPTIONAL | SEC_ASN1_POINTER | SEC_ASN1_XTRN,
+      offsetof(NSSCMSKEKIdentifier, date),
+      SEC_ASN1_SUB(SEC_GeneralizedTimeTemplate) },
+    { SEC_ASN1_OPTIONAL | SEC_ASN1_POINTER | SEC_ASN1_XTRN,
+      offsetof(NSSCMSKEKIdentifier, other),
+      NSSCMSOtherKeyAttributeTemplate },
     { 0 }
 };
 
@@ -380,11 +435,11 @@ const SEC_ASN1Template NSSCMSRecipientInfoTemplate[] = {
     { SEC_ASN1_CHOICE,
       offsetof(NSSCMSRecipientInfo, recipientInfoType), NULL,
       sizeof(NSSCMSRecipientInfo) },
-    { SEC_ASN1_EXPLICIT | SEC_ASN1_CONSTRUCTED | SEC_ASN1_CONTEXT_SPECIFIC | 1,
+    { SEC_ASN1_CONSTRUCTED | SEC_ASN1_CONTEXT_SPECIFIC | 1,
       offsetof(NSSCMSRecipientInfo, ri.keyAgreeRecipientInfo),
       NSSCMSKeyAgreeRecipientInfoTemplate,
       NSSCMSRecipientInfoID_KeyAgree },
-    { SEC_ASN1_EXPLICIT | SEC_ASN1_CONSTRUCTED | SEC_ASN1_CONTEXT_SPECIFIC | 2,
+    { SEC_ASN1_CONSTRUCTED | SEC_ASN1_CONTEXT_SPECIFIC | 2,
       offsetof(NSSCMSRecipientInfo, ri.kekRecipientInfo),
       NSSCMSKEKRecipientInfoTemplate,
       NSSCMSRecipientInfoID_KEK },
@@ -485,6 +540,9 @@ nss_cms_choose_content_template(void *src_or_dest, PRBool encoding)
             break;
         case SEC_OID_PKCS7_ENCRYPTED_DATA:
             theTemplate = NSS_PointerToCMSEncryptedDataTemplate;
+            break;
+        case SEC_OID_CMS_AUTH_ENVELOPED_DATA:
+            theTemplate = NSS_PointerToCMSAuthEnvelopedDataTemplate;
             break;
     }
     return theTemplate;

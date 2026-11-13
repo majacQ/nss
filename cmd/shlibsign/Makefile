@@ -24,22 +24,32 @@ include $(CORE_DEPTH)/coreconf/config.mk
 # (4) Include "local" platform-dependent assignments (OPTIONAL).      #
 #######################################################################
 
+
+EXTRA_LIBS += \
+       $(DIST)/lib/$(LIB_PREFIX)sectool.$(LIB_SUFFIX) \
+       $(NULL)
+
+# SHLIBSign cannot depend on freebl or above as it's used to sign them.
+# use a minimal set of required libraries to compile
 ifeq ($(OS_ARCH), WINNT)
 
 EXTRA_LIBS += \
-	$(NSPR_LIB_DIR)/$(NSPR31_LIB_PREFIX)plc4.$(LIB_SUFFIX) \
-	$(NSPR_LIB_DIR)/$(NSPR31_LIB_PREFIX)plds4.$(LIB_SUFFIX) \
-	$(NSPR_LIB_DIR)/$(NSPR31_LIB_PREFIX)nspr4.$(LIB_SUFFIX) \
-	$(NULL)
+       $(NSSUTIL_LIB_DIR)/$(LIB_PREFIX)nssutil3.$(LIB_SUFFIX) \
+       $(NSPR_LIB_DIR)/$(NSPR31_LIB_PREFIX)plc4.$(LIB_SUFFIX) \
+       $(NSPR_LIB_DIR)/$(NSPR31_LIB_PREFIX)plds4.$(LIB_SUFFIX) \
+       $(NSPR_LIB_DIR)/$(NSPR31_LIB_PREFIX)nspr4.$(LIB_SUFFIX) \
+       $(NULL)
 
 else
 
 EXTRA_SHARED_LIBS += \
-	-L$(NSPR_LIB_DIR) \
-	-lplc4 \
-	-lplds4 \
-	-lnspr4 \
-	$(NULL)
+       -L$(NSSUTIL_LIB_DIR) \
+       -lnssutil3 \
+       -L$(NSPR_LIB_DIR) \
+       -lplc4 \
+       -lplds4 \
+       -lnspr4 \
+       $(NULL)
 
 endif
 
@@ -81,11 +91,6 @@ include ../platrules.mk
 SRCDIR = $(call core_abspath,.)
 
 %.chk: %.$(DLL_SUFFIX) 
-ifeq ($(OS_TARGET), OS2)
-	cd $(OBJDIR) ; cmd.exe /c $(SRCDIR)/sign.cmd $(DIST) \
-	$(call core_abspath,$(OBJDIR)) $(OS_TARGET) \
-	$(call core_abspath,$(NSPR_LIB_DIR)) $(call core_abspath,$<)
-else
     ifeq ($(CROSS_COMPILE),1)
 	# do nothing
     else
@@ -93,7 +98,7 @@ else
 	$(call core_abspath,$(OBJDIR)) $(OS_TARGET) \
 	$(call core_abspath,$(NSPR_LIB_DIR)) $(call core_abspath,$<)
     endif
-endif
+
 
 libs: install
 ifdef CHECKLOC

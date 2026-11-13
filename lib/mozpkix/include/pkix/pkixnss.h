@@ -50,6 +50,13 @@ Result VerifyECDSASignedDataNSS(Input data, DigestAlgorithm digestAlgorithm,
                                 Input signature, Input subjectPublicKeyInfo,
                                 void* pkcs11PinArg);
 
+// Verifies the ML-DSA signature on the given data using the given ML-DSA
+// public key, which must be for the given parameter set. Returns
+// Result::ERROR_SIGNATURE_ALGORITHM_MISMATCH if it is not.
+Result VerifyMLDSASignedDataNSS(Input data, MLDSAParameterSet parameterSet,
+                                Input signature, Input subjectPublicKeyInfo,
+                                void* pkcs11PinArg);
+
 // Computes the digest of the given data using the given digest algorithm.
 //
 // item contains the data to hash.
@@ -94,6 +101,8 @@ enum ErrorCode {
   MOZILLA_PKIX_ERROR_ADDITIONAL_POLICY_CONSTRAINT_FAILED = ERROR_BASE + 13,
   MOZILLA_PKIX_ERROR_SELF_SIGNED_CERT = ERROR_BASE + 14,
   MOZILLA_PKIX_ERROR_MITM_DETECTED = ERROR_BASE + 15,
+  MOZILLA_PKIX_ERROR_INSUFFICIENT_CERTIFICATE_TRANSPARENCY = ERROR_BASE + 16,
+  MOZILLA_PKIX_ERROR_ISSUER_NO_LONGER_TRUSTED = ERROR_BASE + 17,
   END_OF_LIST
 };
 

@@ -56,20 +56,19 @@ gtest_start()
     DIR="${GTESTDIR}/$i"
     html_head "$i"
     if [ ! -d "$DIR" ]; then
-      mkdir -p "$DIR"
-      echo "${BINDIR}/certutil" -N -d "$DIR" --empty-password 2>&1
-      "${BINDIR}/certutil" -N -d "$DIR" --empty-password 2>&1
-
-      PROFILEDIR="$DIR" make_cert dummy p256 sign
+      "${QADIR}/gtests/gtest_db.sh" "$DIR" "${BINDIR}/certutil" "${R_NOISE_FILE}"
+      html_msg $? 0 "create gtest certificates for $i"
+      # smime_gtest decodes an AuthEnvelopedData blob (RFC 5083) encrypted to
+      # Fran; import that identity into this suite's DB only, so sibling suites'
+      # cert-count expectations are unaffected.
+      if [ "$i" = "smime_gtest" ]; then
+        "${BINDIR}/pk12util" -d "$DIR" -i "${QADIR}/smime/interop-openssl/Fran.p12" -W nss -K "" >/dev/null
+        html_msg $? 0 "import Fran's identity for $i"
+      fi
     fi
     pushd "$DIR"
     GTESTREPORT="$DIR/report.xml"
     PARSED_REPORT="$DIR/report.parsed"
-    # The mozilla::pkix gtests cause an ODR violation that we ignore.
-    # See bug 1588567.
-    if [ "$i" = "mozpkix_gtest" ]; then
-      EXTRA_ASAN_OPTIONS="detect_odr_violation=0"
-    fi
     # NSS CI sets a lower max for PBE iterations, otherwise cert.sh
     # is very slow. Unset this maxiumum for softoken_gtest, as it
     # needs to check the default value.
@@ -78,10 +77,9 @@ gtest_start()
       unset NSS_MAX_MP_PBE_ITERATION_COUNT
     fi
     echo "executing $i"
-    ASAN_OPTIONS="$ASAN_OPTIONS:$EXTRA_ASAN_OPTIONS" "${BINDIR}/$i" \
-                 -s "${SOURCE_DIR}/gtests/$i" \
-                 -d "$DIR" -w --gtest_output=xml:"${GTESTREPORT}" \
-                              --gtest_filter="${GTESTFILTER:-*}"
+    "${BINDIR}/$i" -s "${SOURCE_DIR}/gtests/$i" -d "$DIR" -w \
+                   --gtest_output=xml:"${GTESTREPORT}" \
+                   --gtest_filter="${GTESTFILTER:-*}"
     html_msg $? 0 "$i run successfully"
     if [ "$i" = "softoken_gtest" ]; then
       export NSS_MAX_MP_PBE_ITERATION_COUNT=$OLD_MAX_PBE_ITERATIONS
@@ -101,7 +99,7 @@ gtest_cleanup()
 }
 
 ################## main #################################################
-GTESTS="${GTESTS:-base_gtest certhigh_gtest certdb_gtest der_gtest pk11_gtest util_gtest freebl_gtest softoken_gtest sysinit_gtest smime_gtest mozpkix_gtest}"
+GTESTS="${GTESTS:-base_gtest certhigh_gtest certdb_gtest der_gtest pk11_gtest util_gtest freebl_gtest softoken_gtest softoken_static_gtest sysinit_gtest smime_gtest mozpkix_gtest cryptohi_gtest}"
 gtest_init "$0"
 gtest_start
 gtest_cleanup

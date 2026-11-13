@@ -25,6 +25,7 @@
 #include "pkixgtest.h"
 
 #include "mozpkix/pkixder.h"
+#include "mozpkix/pkixutil.h"
 #include "mozpkix/test/pkixtestutil.h"
 
 using namespace mozilla::pkix;
@@ -71,8 +72,7 @@ private:
   }
 
   Result CheckRevocation(EndEntityOrCA, const CertID&, Time, Duration,
-                         /*optional*/ const Input*, /*optional*/ const Input*,
-                         /*optional*/ const Input*)
+                         /*optional*/ const Input*, /*optional*/ const Input*)
                          override
   {
     return Success;
@@ -274,4 +274,60 @@ TEST_F(pkixcert_extension, DuplicateSubjectAltName)
                            KeyPurposeId::anyExtendedKeyUsage,
                            CertPolicyId::anyPolicy,
                            nullptr/*stapledOCSPResponse*/));
+}
+
+TEST_F(pkixcert_extension, QCStatements)
+{
+  // python DottedOIDToCode.py --tlv id-pe-qcStatements 1.3.6.1.5.5.7.1.3
+  const uint8_t tlv_id_pe_qcStatements[] = {
+    0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x01, 0x03
+  };
+
+  ByteString qcStatementsBytes(
+    TLV(der::SEQUENCE,
+        BytesToByteString(tlv_id_pe_qcStatements) +
+        TLV(der::OCTET_STRING, ByteString(reinterpret_cast<const uint8_t*>("qcStatements contents")))));
+  const ByteString extensions[] = { qcStatementsBytes, ByteString() };
+  const char* certCN = "Cert With qcStatements";
+  ByteString cert(CreateCertWithExtensions(certCN, extensions));
+  ASSERT_FALSE(ENCODING_FAILED(cert));
+  Input certInput;
+  ASSERT_EQ(Success, certInput.Init(cert.data(), cert.length()));
+  BackCert backCert(certInput, EndEntityOrCA::MustBeEndEntity, nullptr);
+  ASSERT_EQ(Success, backCert.Init());
+  const Input *qcStatements(backCert.GetQCStatements());
+  ASSERT_TRUE(qcStatements);
+  ByteString qcStatementsContents(qcStatements->UnsafeGetData(), qcStatements->GetLength());
+  ASSERT_EQ(ByteString(reinterpret_cast<const uint8_t*>("qcStatements contents")), qcStatementsContents);
+}
+
+// FindSubjectPublicKeyInfo returns the subjectPublicKeyInfo of a certificate
+// that BackCert::Init accepts, and BackCert::Init's error otherwise.
+TEST_F(pkixcert_extension, FindSubjectPublicKeyInfo)
+{
+  const char* cn = "Cert Extension Test";
+  ByteString cert(CreateCertWithExtensions(cn, nullptr));
+  ASSERT_FALSE(ENCODING_FAILED(cert));
+  Input certInput;
+  ASSERT_EQ(Success, certInput.Init(cert.data(), cert.length()));
+  Input spki;
+  ASSERT_EQ(Success, FindSubjectPublicKeyInfo(certInput, spki));
+  ScopedTestKeyPair key(CloneReusedKeyPair());
+  ASSERT_TRUE(InputEqualsByteString(spki, key->subjectPublicKeyInfo));
+
+  // An unknown critical extension is rejected.
+  ByteString unknownCritical(
+    TLV(der::SEQUENCE,
+        BytesToByteString(tlv_unknownExtensionOID) +
+        Boolean(true) +
+        TLV(der::OCTET_STRING, ByteString())));
+  ByteString unknownCriticalCert(
+    CreateCertWithOneExtension(cn, unknownCritical));
+  ASSERT_FALSE(ENCODING_FAILED(unknownCriticalCert));
+  Input unknownCriticalInput;
+  ASSERT_EQ(Success, unknownCriticalInput.Init(unknownCriticalCert.data(),
+                                               unknownCriticalCert.length()));
+  Input unknownCriticalSPKI;
+  ASSERT_EQ(Result::ERROR_UNKNOWN_CRITICAL_EXTENSION,
+            FindSubjectPublicKeyInfo(unknownCriticalInput, unknownCriticalSPKI));
 }

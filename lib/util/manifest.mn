@@ -9,8 +9,11 @@ EXPORTS = \
 	ciferfam.h \
 	eccutil.h \
 	hasht.h \
+	kyber.h \
+	ml_dsat.h \
 	nssb64.h \
 	nssb64t.h \
+        nsshash.h \
 	nsslocks.h \
 	nssilock.h \
 	nssilckt.h \
@@ -59,8 +62,8 @@ CSRCS = \
 	errstrs.c \
 	nssb64d.c \
 	nssb64e.c \
+	nsshash.c \
 	nssrwlk.c \
-	nssilock.c \
 	oidstring.c \
 	pkcs1sig.c \
 	portreg.c \

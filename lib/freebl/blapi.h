@@ -12,6 +12,7 @@
 #include "hasht.h"
 #include "cmac.h"
 #include "alghmac.h"
+#include "kyber.h"
 
 SEC_BEGIN_PROTOS
 
@@ -281,7 +282,7 @@ RSA_CheckSignRecover(RSAPublicKey *key,
 */
 
 /* Generate a new random value within the interval [2, q-1].
-*/
+ */
 extern SECStatus DSA_NewRandom(PLArenaPool *arena, const SECItem *q,
                                SECItem *random);
 
@@ -326,11 +327,6 @@ extern SECStatus DSA_SignDigestWithSeed(DSAPrivateKey *key,
 /******************************************************
 ** Diffie Helman key exchange algorithm
 */
-
-/* Generates parameters for Diffie-Helman key generation.
-**  primeLen is the length in bytes of prime P to be generated.
-*/
-extern SECStatus DH_GenParam(int primeLen, DHParams **params);
 
 /* Generates a public and private key, both of which are encoded in a single
 **  DHPrivateKey struct. Params is input, privKey are output.
@@ -433,7 +429,7 @@ JPAKE_Verify(PLArenaPool *arena, const PQGParams *pqg,
  * base and x2s will be allocated in the arena. The arena is *not* optional so
  * do not pass NULL for the arena parameter. The arena should be zeroed when it
  * is freed.
-*/
+ */
 SECStatus
 JPAKE_Round2(PLArenaPool *arena, const SECItem *p, const SECItem *q,
              const SECItem *gx1, const SECItem *gx3, const SECItem *gx4,
@@ -1878,7 +1874,7 @@ extern void BL_SetForkState(PRBool forked);
 
 /*
 ** pepare an ECParam structure from DEREncoded params
- */
+*/
 extern SECStatus EC_FillParams(PLArenaPool *arena,
                                const SECItem *encodedParams, ECParams *params);
 extern SECStatus EC_DecodeParams(const SECItem *encodedParams,
@@ -1895,6 +1891,84 @@ extern int EC_GetPointSize(const ECParams *params);
  * use the internal table to get the size in bytes of a single EC coordinate
  */
 extern int EC_GetScalarSize(const ECParams *params);
+
+/* Generate a Kyber key pair with parameters given by |params|. If |seed| is
+ * null this function generates its own randomness internally, otherwise the
+ * key is derived from |seed| using the method defined by |params|. The caller
+ * is responsible for allocating appropriately sized `privKey` and `pubKey`
+ * items.
+ */
+extern SECStatus Kyber_NewKey(KyberParams params, const SECItem *seed, SECItem *privKey, SECItem *pubKey);
+
+/* Encapsulate a random secret to the Kyber public key `pubKey`. If `seed` is
+ * null this function generates its own randomness internally, otherwise the
+ * secret is derived from `seed` using the method defined by `params`. The
+ * caller is responsible for allocating appropriately sized `ciphertext` and
+ * `secret` items. Returns an error if any arguments' length is incompatible
+ * with `params`.
+ */
+extern SECStatus Kyber_Encapsulate(KyberParams params, const SECItem *seed, const SECItem *pubKey, SECItem *ciphertext, SECItem *secret);
+
+/* Decapsulate a secret from a Kyber ciphertext `ciphertext` using the private
+ * key `privKey`. The caller is responsible for allocating an appropriately sized
+ * `secret` item. Returns an error if any arguments' length is incompatible
+ * with `params`.
+ */
+extern SECStatus Kyber_Decapsulate(KyberParams params, const SECItem *privKey, const SECItem *ciphertext, SECItem *secret);
+
+/* EdDSA (only ed25519)
+** On input,  msg == buffer containing message to be signed.
+**            key == key to be used for signature.
+** Output, signature == Buffer containing the signature.
+*/
+extern SECStatus ED_SignMessage(ECPrivateKey *key, SECItem *signature,
+                                const SECItem *msg);
+
+/* On input,  signature == buffer holding the signature.
+**            msg == buffer holding the message.
+**            key == key used to verify the signature.
+** Output, whether the signature is valid or not.
+*/
+extern SECStatus ED_VerifyMessage(ECPublicKey *key, const SECItem *signature,
+                                  const SECItem *msg);
+
+/* EdDSA (only ed25519)
+ * Derive the public key `publicKey` from the private key `privateKey`.
+ */
+extern SECStatus ED_DerivePublicKey(const SECItem *privateKey, SECItem *publicKey);
+
+extern SECStatus X25519_DerivePublicKey(const SECItem *privateKey, SECItem *publicKey);
+
+/* Public key derivation is supported only for the curves supporting pt_mul method. */
+extern SECStatus EC_DerivePublicKey(const SECItem *privateKey, const ECParams *ecParams, SECItem *publicKey);
+
+/*
+ * ML_DSA functions
+ */
+SECStatus MLDSA_NewKey(CK_ML_DSA_PARAMETER_SET_TYPE paramSet, SECItem *seed,
+                       MLDSAPrivateKey *privKey, MLDSAPublicKey *pubKey);
+/* The context takes its own copy of "key", so the caller is free to release or
+ * change its own copy before MLDSA_SignFinal (or MLDSA_VerifyFinal) runs. */
+SECStatus MLDSA_SignInit(MLDSAPrivateKey *key, CK_HEDGE_TYPE hedgeType,
+                         const SECItem *sgnCtx, MLDSAContext **ctx);
+SECStatus MLDSA_SignUpdate(MLDSAContext *ctx, const SECItem *data);
+SECStatus MLDSA_SignFinal(MLDSAContext *ctx, SECItem *signature);
+
+SECStatus MLDSA_VerifyInit(MLDSAPublicKey *key, const SECItem *sgnCtx,
+                           MLDSAContext **ctx);
+SECStatus MLDSA_VerifyUpdate(MLDSAContext *ctx, const SECItem *data);
+SECStatus MLDSA_VerifyFinal(MLDSAContext *ctx, const SECItem *signature);
+/* Release a context from MLDSA_SignInit or MLDSA_VerifyInit. The *Final calls
+ * do not free it, so this must be called even after a successful *Final, and
+ * it is what lets a caller clean up an operation it abandons part way. */
+void MLDSA_DestroyContext(MLDSAContext *ctx);
+
+/* Decompress public key.
+ ** On input, publicCompressed == buffer containing compressed key
+ ** Output, publicRaw == decompressed public key. The function returns true iff the
+ ** decompressed key belongs to the appropriate curve.
+ */
+SECStatus EC_DecompressPublicKey(const SECItem *publicCompressed, const ECParams *params, SECItem *publicUncompressed);
 
 SEC_END_PROTOS
 

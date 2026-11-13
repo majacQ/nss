@@ -4,14 +4,14 @@ set -v -e -x
 
 source $(dirname $0)/tools.sh
 
-# Clone NSPR if needed.
-hg_clone https://hg.mozilla.org/projects/nspr nspr default
+# Clone NSPR at the pinned revision.
+$(dirname $0)/clone_nspr.sh
 
-if [[ -f nss/nspr.patch && "$ALLOW_NSPR_PATCH" == "1" ]]; then
-  pushd nspr
+pushd nspr
+if [[ -f ../nss/nspr.patch && "$ALLOW_NSPR_PATCH" == "1" ]]; then
   cat ../nss/nspr.patch | patch -p1
-  popd
 fi
+popd
 
 # Build.
 rm -rf dist

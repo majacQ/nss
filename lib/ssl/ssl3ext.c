@@ -57,6 +57,7 @@ static const ssl3ExtensionHandler clientHelloHandlers[] = {
     { ssl_tls13_cookie_xtn, &tls13_ServerHandleCookieXtn },
     { ssl_tls13_post_handshake_auth_xtn, &tls13_ServerHandlePostHandshakeAuthXtn },
     { ssl_record_size_limit_xtn, &ssl_HandleRecordSizeLimitXtn },
+    { ssl_certificate_compression_xtn, &ssl3_HandleCertificateCompressionXtn },
     { 0, NULL }
 };
 
@@ -110,6 +111,7 @@ static const ssl3ExtensionHandler certificateRequestHandlers[] = {
     { ssl_signature_algorithms_xtn, &ssl3_HandleSigAlgsXtn },
     { ssl_tls13_certificate_authorities_xtn,
       &tls13_ClientHandleCertAuthoritiesXtn },
+    { ssl_certificate_compression_xtn, &ssl3_HandleCertificateCompressionXtn },
     { 0, NULL }
 };
 
@@ -140,15 +142,16 @@ static const sslExtensionBuilder clientHelloSendersTLS[] = {
     { ssl_tls13_key_share_xtn, &tls13_ClientSendKeyShareXtn },
     { ssl_tls13_early_data_xtn, &tls13_ClientSendEarlyDataXtn },
     /* Some servers (e.g. WebSphere Application Server 7.0 and Tomcat) will
-       * time out or terminate the connection if the last extension in the
-       * client hello is empty. They are not intolerant of TLS 1.2, so list
-       * signature_algorithms at the end. See bug 1243641. */
+     * time out or terminate the connection if the last extension in the
+     * client hello is empty. They are not intolerant of TLS 1.2, so list
+     * signature_algorithms at the end. See bug 1243641. */
     { ssl_tls13_supported_versions_xtn, &tls13_ClientSendSupportedVersionsXtn },
     { ssl_signature_algorithms_xtn, &ssl3_SendSigAlgsXtn },
     { ssl_tls13_cookie_xtn, &tls13_ClientSendHrrCookieXtn },
     { ssl_tls13_psk_key_exchange_modes_xtn, &tls13_ClientSendPskModesXtn },
     { ssl_tls13_post_handshake_auth_xtn, &tls13_ClientSendPostHandshakeAuthXtn },
     { ssl_record_size_limit_xtn, &ssl_SendRecordSizeLimitXtn },
+    { ssl_certificate_compression_xtn, &ssl3_SendCertificateCompressionXtn },
     /* TLS 1.3 GREASE extensions - 1 zero byte. */
     { ssl_tls13_grease_xtn, &tls13_SendGreaseXtn },
     /* The pre_shared_key extension MUST be last. */
@@ -166,6 +169,7 @@ static const sslExtensionBuilder tls13_cert_req_senders[] = {
     { ssl_tls13_certificate_authorities_xtn, &tls13_SendCertAuthoritiesXtn },
     /* TLS 1.3 GREASE extension. */
     { ssl_tls13_grease_xtn, &tls13_SendEmptyGreaseXtn },
+    { ssl_certificate_compression_xtn, &ssl3_SendCertificateCompressionXtn },
     { 0, NULL }
 };
 
@@ -203,6 +207,7 @@ static const struct {
     { ssl_tls13_certificate_authorities_xtn, ssl_ext_native },
     { ssl_renegotiation_info_xtn, ssl_ext_native },
     { ssl_tls13_encrypted_client_hello_xtn, ssl_ext_native_only },
+    { ssl_certificate_compression_xtn, ssl_ext_native },
 };
 
 static SSLExtensionSupport
@@ -331,6 +336,26 @@ ssl3_ExtensionAdvertised(const sslSocket *ss, PRUint16 ex_type)
                                   xtnData->numAdvertised, ex_type);
 }
 
+void
+ssl3_RecordExtensionNegotiated(const sslSocket *ss, TLSExtensionData *xtnData,
+                               PRUint16 ex_type)
+{
+    /* Record that an extension was negotiated during a full TLS handshake.
+     * This function must NOT be used to track extensions carried in
+     * post-handshake messages (e.g. CertificateRequest during PHA);
+     * their negotiation state should instead be stored in dedicated fields on
+     * TLSExtensionData or sslSocket (e.g. xtnData->compressionAlg for
+     * certificate compression). */
+    PORT_Assert(!ss->firstHsDone ||
+                ss->opt.enableRenegotiation != SSL_RENEGOTIATE_NEVER);
+    PORT_Assert(!arrayContainsExtension(xtnData->negotiated,
+                                        xtnData->numNegotiated, ex_type));
+    PORT_Assert(xtnData->numNegotiated < SSL_MAX_EXTENSIONS);
+    if (xtnData->numNegotiated < SSL_MAX_EXTENSIONS) {
+        xtnData->negotiated[xtnData->numNegotiated++] = ex_type;
+    }
+}
+
 PRBool
 ssl3_ExtensionAdvertisedClientHelloInner(const sslSocket *ss, PRUint16 ex_type)
 {
@@ -349,6 +374,8 @@ ssl3_ExtensionAdvertisedClientHelloInner(const sslSocket *ss, PRUint16 ex_type)
 SECStatus
 ssl3_ParseExtensions(sslSocket *ss, PRUint8 **b, PRUint32 *length)
 {
+    PORT_Assert(ss->opt.noLocks || ssl_HaveSSL3HandshakeLock(ss));
+
     /* Clean out the extensions list. */
     ssl3_DestroyRemoteExtensions(&ss->ssl3.hs.remoteExtensions);
 
@@ -480,6 +507,10 @@ ssl3_HandleParsedExtensions(sslSocket *ss, SSLHandshakeType message)
                              (message == ssl_hs_new_session_ticket);
     PRCList *cursor;
 
+    /* The handlers below write to |ss->ssl3.hs| and |ss->xtnData|, both of
+     * which are protected by the SSL3 handshake lock. */
+    PORT_Assert(ss->opt.noLocks || ssl_HaveSSL3HandshakeLock(ss));
+
     switch (message) {
         case ssl_hs_client_hello:
             handlers = clientHelloHandlers;
@@ -537,9 +568,9 @@ ssl3_HandleParsedExtensions(sslSocket *ss, SSLHandshakeType message)
                 return SECFailure;
             }
             /* If we offered ECH, we also check whether the extension is compatible with
-            * the Client Hello Inner. We don't yet know whether the server accepted ECH,
-            * so we only store this for now. If we later accept, we check this boolean
-            * and reject with an unsupported_extension alert if it is set. */
+             * the Client Hello Inner. We don't yet know whether the server accepted ECH,
+             * so we only store this for now. If we later accept, we check this boolean
+             * and reject with an unsupported_extension alert if it is set. */
             if (ss->ssl3.hs.echHpkeCtx && !ssl3_ExtensionAdvertisedClientHelloInner(ss, extension->type)) {
                 SSL_TRC(10, ("Server sent xtn type=%d which is invalid for the CHI", extension->type));
                 ss->ssl3.hs.echInvalidExtension = PR_TRUE;
@@ -702,7 +733,12 @@ ssl_CallCustomExtensionSenders(sslSocket *ss, sslBuffer *buf,
         if (hook->writer) {
             /* The writer writes directly into |buf|.  Provide space that allows
              * for the existing extensions, any tail, plus type and length. */
-            unsigned int space = buf->space - (buf->len + tail.len + 4);
+            unsigned int used = buf->len + tail.len + 4;
+            if (used > buf->space) {
+                PORT_SetError(SEC_ERROR_APPLICATION_CALLBACK_ERROR);
+                goto loser;
+            }
+            unsigned int space = buf->space - used;
             append = (*hook->writer)(ss->fd, message,
                                      buf->buf + buf->len + 4, &len, space,
                                      hook->writerArg);
@@ -732,9 +768,13 @@ ssl_CallCustomExtensionSenders(sslSocket *ss, sslBuffer *buf,
         }
     }
 
-    rv = sslBuffer_Append(buf, tail.buf, tail.len);
-    if (rv != SECSuccess) {
-        goto loser; /* Code already set. */
+    /* Restore saved extension and move the marker. */
+    if (ss->xtnData.lastXtnOffset) {
+        ss->xtnData.lastXtnOffset = buf->len;
+        rv = sslBuffer_Append(buf, tail.buf, tail.len);
+        if (rv != SECSuccess) {
+            goto loser; /* Code already set. */
+        }
     }
 
     sslBuffer_Clear(&tail);
@@ -1133,6 +1173,10 @@ tls_ClientHelloExtensionPermutationSetup(sslSocket *ss)
     const size_t buildersSize = (sizeof(sslExtensionBuilder) * buildersLen);
     /* Psk Extension and then NULL entry MUST be last. */
     const size_t permutationLen = buildersLen - 2;
+
+    /* |ss->ssl3.hs.chExtensionPermutation| is protected by the SSL3
+     * handshake lock. */
+    PORT_Assert(ss->opt.noLocks || ssl_HaveSSL3HandshakeLock(ss));
 
     /* There shouldn't already be a stored permutation. */
     PR_ASSERT(!ss->ssl3.hs.chExtensionPermutation);

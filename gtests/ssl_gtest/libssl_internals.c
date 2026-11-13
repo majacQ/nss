@@ -17,37 +17,37 @@
 #include "secmodti.h"
 #include "sslproto.h"
 
-SECStatus SSLInt_RemoveServerCertificates(PRFileDesc *fd) {
+SECStatus SSLInt_RemoveServerCertificates(PRFileDesc* fd) {
   if (!fd) {
     return SECFailure;
   }
-  sslSocket *ss = ssl_FindSocket(fd);
+  sslSocket* ss = ssl_FindSocket(fd);
   if (!ss) {
     return SECFailure;
   }
 
-  PRCList *cursor;
+  PRCList* cursor;
   while (!PR_CLIST_IS_EMPTY(&ss->serverCerts)) {
     cursor = PR_LIST_TAIL(&ss->serverCerts);
     PR_REMOVE_LINK(cursor);
-    ssl_FreeServerCert((sslServerCert *)cursor);
+    ssl_FreeServerCert((sslServerCert*)cursor);
   }
   return SECSuccess;
 }
 
-SECStatus SSLInt_SetDCAdvertisedSigSchemes(PRFileDesc *fd,
-                                           const SSLSignatureScheme *schemes,
+SECStatus SSLInt_SetDCAdvertisedSigSchemes(PRFileDesc* fd,
+                                           const SSLSignatureScheme* schemes,
                                            uint32_t num_sig_schemes) {
   if (!fd) {
     return SECFailure;
   }
-  sslSocket *ss = ssl_FindSocket(fd);
+  sslSocket* ss = ssl_FindSocket(fd);
   if (!ss) {
     return SECFailure;
   }
 
   // Alloc and copy, libssl will free.
-  SSLSignatureScheme *dc_schemes =
+  SSLSignatureScheme* dc_schemes =
       PORT_ZNewArray(SSLSignatureScheme, num_sig_schemes);
   if (!dc_schemes) {
     return SECFailure;
@@ -62,12 +62,12 @@ SECStatus SSLInt_SetDCAdvertisedSigSchemes(PRFileDesc *fd,
   return SECSuccess;
 }
 
-SECStatus SSLInt_TweakChannelInfoForDC(PRFileDesc *fd, PRBool changeAuthKeyBits,
+SECStatus SSLInt_TweakChannelInfoForDC(PRFileDesc* fd, PRBool changeAuthKeyBits,
                                        PRBool changeScheme) {
   if (!fd) {
     return SECFailure;
   }
-  sslSocket *ss = ssl_FindSocket(fd);
+  sslSocket* ss = ssl_FindSocket(fd);
   if (!ss) {
     return SECFailure;
   }
@@ -85,12 +85,12 @@ SECStatus SSLInt_TweakChannelInfoForDC(PRFileDesc *fd, PRBool changeAuthKeyBits,
   return SECSuccess;
 }
 
-SECStatus SSLInt_GetHandshakeRandoms(PRFileDesc *fd, SSL3Random client_random,
+SECStatus SSLInt_GetHandshakeRandoms(PRFileDesc* fd, SSL3Random client_random,
                                      SSL3Random server_random) {
   if (!fd) {
     return SECFailure;
   }
-  sslSocket *ss = ssl_FindSocket(fd);
+  sslSocket* ss = ssl_FindSocket(fd);
   if (!ss) {
     return SECFailure;
   }
@@ -104,8 +104,8 @@ SECStatus SSLInt_GetHandshakeRandoms(PRFileDesc *fd, SSL3Random client_random,
   return SECSuccess;
 }
 
-SECStatus SSLInt_IncrementClientHandshakeVersion(PRFileDesc *fd) {
-  sslSocket *ss = ssl_FindSocket(fd);
+SECStatus SSLInt_IncrementClientHandshakeVersion(PRFileDesc* fd) {
+  sslSocket* ss = ssl_FindSocket(fd);
   if (!ss) {
     return SECFailure;
   }
@@ -118,10 +118,10 @@ SECStatus SSLInt_IncrementClientHandshakeVersion(PRFileDesc *fd) {
 /* Use this function to update the ClientRandom of a client's handshake state
  * after replacing its ClientHello message. We for example need to do this
  * when replacing an SSLv3 ClientHello with its SSLv2 equivalent. */
-SECStatus SSLInt_UpdateSSLv2ClientRandom(PRFileDesc *fd, uint8_t *rnd,
-                                         size_t rnd_len, uint8_t *msg,
+SECStatus SSLInt_UpdateSSLv2ClientRandom(PRFileDesc* fd, uint8_t* rnd,
+                                         size_t rnd_len, uint8_t* msg,
                                          size_t msg_len) {
-  sslSocket *ss = ssl_FindSocket(fd);
+  sslSocket* ss = ssl_FindSocket(fd);
   if (!ss) {
     return SECFailure;
   }
@@ -142,8 +142,8 @@ SECStatus SSLInt_UpdateSSLv2ClientRandom(PRFileDesc *fd, uint8_t *rnd,
   return ssl3_UpdateHandshakeHashes(ss, msg, msg_len);
 }
 
-PRBool SSLInt_ExtensionNegotiated(PRFileDesc *fd, PRUint16 ext) {
-  sslSocket *ss = ssl_FindSocket(fd);
+PRBool SSLInt_ExtensionNegotiated(PRFileDesc* fd, PRUint16 ext) {
+  sslSocket* ss = ssl_FindSocket(fd);
   return (PRBool)(ss && ssl3_ExtensionNegotiated(ss, ext));
 }
 
@@ -151,17 +151,17 @@ PRBool SSLInt_ExtensionNegotiated(PRFileDesc *fd, PRUint16 ext) {
 // still be in cache. Instead, use TlsConnectTestBase::ClearServerCache.
 void SSLInt_ClearSelfEncryptKey() { ssl_ResetSelfEncryptKeys(); }
 
-sslSelfEncryptKeys *ssl_GetSelfEncryptKeysInt();
+sslSelfEncryptKeys* ssl_GetSelfEncryptKeysInt();
 
-void SSLInt_SetSelfEncryptMacKey(PK11SymKey *key) {
-  sslSelfEncryptKeys *keys = ssl_GetSelfEncryptKeysInt();
+void SSLInt_SetSelfEncryptMacKey(PK11SymKey* key) {
+  sslSelfEncryptKeys* keys = ssl_GetSelfEncryptKeysInt();
 
   PK11_FreeSymKey(keys->macKey);
   keys->macKey = key;
 }
 
-SECStatus SSLInt_SetMTU(PRFileDesc *fd, PRUint16 mtu) {
-  sslSocket *ss = ssl_FindSocket(fd);
+SECStatus SSLInt_SetMTU(PRFileDesc* fd, PRUint16 mtu) {
+  sslSocket* ss = ssl_FindSocket(fd);
   if (!ss) {
     return SECFailure;
   }
@@ -170,11 +170,11 @@ SECStatus SSLInt_SetMTU(PRFileDesc *fd, PRUint16 mtu) {
   return SECSuccess;
 }
 
-PRInt32 SSLInt_CountCipherSpecs(PRFileDesc *fd) {
-  PRCList *cur_p;
+PRInt32 SSLInt_CountCipherSpecs(PRFileDesc* fd) {
+  PRCList* cur_p;
   PRInt32 ct = 0;
 
-  sslSocket *ss = ssl_FindSocket(fd);
+  sslSocket* ss = ssl_FindSocket(fd);
   if (!ss) {
     return -1;
   }
@@ -186,10 +186,10 @@ PRInt32 SSLInt_CountCipherSpecs(PRFileDesc *fd) {
   return ct;
 }
 
-void SSLInt_PrintCipherSpecs(const char *label, PRFileDesc *fd) {
-  PRCList *cur_p;
+void SSLInt_PrintCipherSpecs(const char* label, PRFileDesc* fd) {
+  PRCList* cur_p;
 
-  sslSocket *ss = ssl_FindSocket(fd);
+  sslSocket* ss = ssl_FindSocket(fd);
   if (!ss) {
     return;
   }
@@ -197,7 +197,7 @@ void SSLInt_PrintCipherSpecs(const char *label, PRFileDesc *fd) {
   fprintf(stderr, "Cipher specs for %s\n", label);
   for (cur_p = PR_NEXT_LINK(&ss->ssl3.hs.cipherSpecs);
        cur_p != &ss->ssl3.hs.cipherSpecs; cur_p = PR_NEXT_LINK(cur_p)) {
-    ssl3CipherSpec *spec = (ssl3CipherSpec *)cur_p;
+    ssl3CipherSpec* spec = (ssl3CipherSpec*)cur_p;
     fprintf(stderr, "  %s spec epoch=%d (%s) refct=%d\n", SPEC_DIR(spec),
             spec->epoch, spec->phase, spec->refCt);
   }
@@ -207,9 +207,9 @@ void SSLInt_PrintCipherSpecs(const char *label, PRFileDesc *fd) {
  * Force a timer expiry by backdating when all active timers were started.
  * We could set the remaining time to 0 but then backoff would not work properly
  * if we decide to test it. */
-SECStatus SSLInt_ShiftDtlsTimers(PRFileDesc *fd, PRIntervalTime shift) {
+SECStatus SSLInt_ShiftDtlsTimers(PRFileDesc* fd, PRIntervalTime shift) {
   size_t i;
-  sslSocket *ss = ssl_FindSocket(fd);
+  sslSocket* ss = ssl_FindSocket(fd);
   if (!ss) {
     return SECFailure;
   }
@@ -222,14 +222,25 @@ SECStatus SSLInt_ShiftDtlsTimers(PRFileDesc *fd, PRIntervalTime shift) {
   return SECSuccess;
 }
 
+/* Instead of waiting the ACK timer to expire, we send the ack immediately*/
+SECStatus SSLInt_SendImmediateACK(PRFileDesc* fd) {
+  sslSocket* ss = ssl_FindSocket(fd);
+  if (!ss) {
+    return SECFailure;
+  }
+  PORT_Assert(IS_DTLS(ss));
+  dtls13_SendAck(ss);
+  return SECSuccess;
+}
+
 #define CHECK_SECRET(secret)                  \
   if (ss->ssl3.hs.secret) {                   \
     fprintf(stderr, "%s != NULL\n", #secret); \
     return PR_FALSE;                          \
   }
 
-PRBool SSLInt_CheckSecretsDestroyed(PRFileDesc *fd) {
-  sslSocket *ss = ssl_FindSocket(fd);
+PRBool SSLInt_CheckSecretsDestroyed(PRFileDesc* fd) {
+  sslSocket* ss = ssl_FindSocket(fd);
   if (!ss) {
     return PR_FALSE;
   }
@@ -243,25 +254,24 @@ PRBool SSLInt_CheckSecretsDestroyed(PRFileDesc *fd) {
   return PR_TRUE;
 }
 
-PRBool sslint_DamageTrafficSecret(PRFileDesc *fd, size_t offset) {
-  unsigned char data[32] = {0};
-  PK11SymKey **keyPtr;
-  PK11SlotInfo *slot = PK11_GetInternalSlot();
-  SECItem key_item = {siBuffer, data, sizeof(data)};
-  sslSocket *ss = ssl_FindSocket(fd);
+PRBool sslint_DamageTrafficSecret(PRFileDesc* fd, size_t offset) {
+  PK11SymKey** keyPtr;
+  PK11SlotInfo* slot = PK11_GetInternalSlot();
+  sslSocket* ss = ssl_FindSocket(fd);
   if (!ss) {
     return PR_FALSE;
   }
   if (!slot) {
     return PR_FALSE;
   }
-  keyPtr = (PK11SymKey **)((char *)&ss->ssl3.hs + offset);
+  keyPtr = (PK11SymKey**)((char*)&ss->ssl3.hs + offset);
   if (!*keyPtr) {
     return PR_FALSE;
   }
   PK11_FreeSymKey(*keyPtr);
-  *keyPtr = PK11_ImportSymKey(slot, CKM_NSS_HKDF_SHA256, PK11_OriginUnwrap,
-                              CKA_DERIVE, &key_item, NULL);
+  /* Any other key will do. Generate one: FIPS tokens refuse raw imports. */
+  *keyPtr = PK11_TokenKeyGenWithFlags(slot, CKM_GENERIC_SECRET_KEY_GEN, NULL,
+                                      32, NULL, CKF_DERIVE, 0, NULL);
   PK11_FreeSlot(slot);
   if (!*keyPtr) {
     return PR_FALSE;
@@ -270,23 +280,23 @@ PRBool sslint_DamageTrafficSecret(PRFileDesc *fd, size_t offset) {
   return PR_TRUE;
 }
 
-PRBool SSLInt_DamageClientHsTrafficSecret(PRFileDesc *fd) {
+PRBool SSLInt_DamageClientHsTrafficSecret(PRFileDesc* fd) {
   return sslint_DamageTrafficSecret(
       fd, offsetof(SSL3HandshakeState, clientHsTrafficSecret));
 }
 
-PRBool SSLInt_DamageServerHsTrafficSecret(PRFileDesc *fd) {
+PRBool SSLInt_DamageServerHsTrafficSecret(PRFileDesc* fd) {
   return sslint_DamageTrafficSecret(
       fd, offsetof(SSL3HandshakeState, serverHsTrafficSecret));
 }
 
-PRBool SSLInt_DamageEarlyTrafficSecret(PRFileDesc *fd) {
+PRBool SSLInt_DamageEarlyTrafficSecret(PRFileDesc* fd) {
   return sslint_DamageTrafficSecret(
       fd, offsetof(SSL3HandshakeState, clientEarlyTrafficSecret));
 }
 
-SECStatus SSLInt_Set0RttAlpn(PRFileDesc *fd, PRUint8 *data, unsigned int len) {
-  sslSocket *ss = ssl_FindSocket(fd);
+SECStatus SSLInt_Set0RttAlpn(PRFileDesc* fd, PRUint8* data, unsigned int len) {
+  sslSocket* ss = ssl_FindSocket(fd);
   if (!ss) {
     return SECFailure;
   }
@@ -303,8 +313,8 @@ SECStatus SSLInt_Set0RttAlpn(PRFileDesc *fd, PRUint8 *data, unsigned int len) {
   return SECSuccess;
 }
 
-PRBool SSLInt_HasCertWithAuthType(PRFileDesc *fd, SSLAuthType authType) {
-  sslSocket *ss = ssl_FindSocket(fd);
+PRBool SSLInt_HasCertWithAuthType(PRFileDesc* fd, SSLAuthType authType) {
+  sslSocket* ss = ssl_FindSocket(fd);
   if (!ss) {
     return PR_FALSE;
   }
@@ -312,8 +322,8 @@ PRBool SSLInt_HasCertWithAuthType(PRFileDesc *fd, SSLAuthType authType) {
   return (PRBool)(!!ssl_FindServerCert(ss, authType, NULL));
 }
 
-PRBool SSLInt_SendAlert(PRFileDesc *fd, uint8_t level, uint8_t type) {
-  sslSocket *ss = ssl_FindSocket(fd);
+PRBool SSLInt_SendAlert(PRFileDesc* fd, uint8_t level, uint8_t type) {
+  sslSocket* ss = ssl_FindSocket(fd);
   if (!ss) {
     return PR_FALSE;
   }
@@ -324,9 +334,9 @@ PRBool SSLInt_SendAlert(PRFileDesc *fd, uint8_t level, uint8_t type) {
   return PR_TRUE;
 }
 
-SECStatus SSLInt_AdvanceReadSeqNum(PRFileDesc *fd, PRUint64 to) {
-  sslSocket *ss;
-  ssl3CipherSpec *spec;
+SECStatus SSLInt_AdvanceReadSeqNum(PRFileDesc* fd, PRUint64 to) {
+  sslSocket* ss;
+  ssl3CipherSpec* spec;
 
   ss = ssl_FindSocket(fd);
   if (!ss) {
@@ -354,11 +364,11 @@ SECStatus SSLInt_AdvanceReadSeqNum(PRFileDesc *fd, PRUint64 to) {
   return SECSuccess;
 }
 
-SECStatus SSLInt_AdvanceWriteSeqNum(PRFileDesc *fd, PRUint64 to) {
-  sslSocket *ss;
-  ssl3CipherSpec *spec;
-  PK11Context *pk11ctxt;
-  const ssl3BulkCipherDef *cipher_def;
+SECStatus SSLInt_AdvanceWriteSeqNum(PRFileDesc* fd, PRUint64 to) {
+  sslSocket* ss;
+  ssl3CipherSpec* spec;
+  PK11Context* pk11ctxt;
+  const ssl3BulkCipherDef* cipher_def;
 
   ss = ssl_FindSocket(fd);
   if (!ss) {
@@ -397,8 +407,8 @@ SECStatus SSLInt_AdvanceWriteSeqNum(PRFileDesc *fd, PRUint64 to) {
       pk11ctxt->ivFixedBits = cipher_def->iv_size * BPB;
       pk11ctxt->ivGen = CKG_GENERATE_COUNTER;
     }
-    /* DTLS included the epoch in the fixed portion of the IV */
-    if (IS_DTLS(ss)) {
+    /* DTLS1.2 and below included the epoch in the fixed portion of the IV */
+    if (IS_DTLS_1_OR_12(ss)) {
       pk11ctxt->ivFixedBits += 2 * BPB;
     }
   }
@@ -410,8 +420,52 @@ SECStatus SSLInt_AdvanceWriteSeqNum(PRFileDesc *fd, PRUint64 to) {
   return SECSuccess;
 }
 
-SECStatus SSLInt_AdvanceWriteSeqByAWindow(PRFileDesc *fd, PRInt32 extra) {
-  sslSocket *ss;
+/* The next two functions are responsible for replacing the epoch count with the
+  one given as the parameter. Important: It does not modify any other data, i.e.
+  keys. Used in ssl_keyupdate_unittests.cc,
+  DTLSKeyUpdateClient_KeyUpdateMaxEpoch TV.
+   */
+SECStatus SSLInt_AdvanceWriteEpochNum(PRFileDesc* fd, PRUint64 to) {
+  sslSocket* ss;
+  ss = ssl_FindSocket(fd);
+  if (!ss) {
+    return SECFailure;
+  }
+  // As currently the epoch is presented as a uint16, the max_epoch is the
+  // maximum value of the type
+  PRUint64 max_epoch = UINT16_MAX;
+  if (to > max_epoch) {
+    PORT_SetError(SEC_ERROR_INVALID_ARGS);
+    return SECFailure;
+  }
+
+  ssl_GetSpecWriteLock(ss);
+  ss->ssl3.cwSpec->epoch = to;
+  ssl_ReleaseSpecWriteLock(ss);
+  return SECSuccess;
+}
+
+SECStatus SSLInt_AdvanceReadEpochNum(PRFileDesc* fd, PRUint64 to) {
+  sslSocket* ss;
+  ss = ssl_FindSocket(fd);
+  if (!ss) {
+    return SECFailure;
+  }
+
+  PRUint64 max_epoch = UINT16_MAX;
+  if (to > max_epoch) {
+    PORT_SetError(SEC_ERROR_INVALID_ARGS);
+    return SECFailure;
+  }
+
+  ssl_GetSpecReadLock(ss);
+  ss->ssl3.crSpec->epoch = to;
+  ssl_ReleaseSpecReadLock(ss);
+  return SECSuccess;
+}
+
+SECStatus SSLInt_AdvanceWriteSeqByAWindow(PRFileDesc* fd, PRInt32 extra) {
+  sslSocket* ss;
   sslSequenceNumber to;
 
   ss = ssl_FindSocket(fd);
@@ -424,14 +478,14 @@ SECStatus SSLInt_AdvanceWriteSeqByAWindow(PRFileDesc *fd, PRInt32 extra) {
   return SSLInt_AdvanceWriteSeqNum(fd, to);
 }
 
-SECStatus SSLInt_AdvanceDtls13DecryptFailures(PRFileDesc *fd, PRUint64 to) {
-  sslSocket *ss = ssl_FindSocket(fd);
+SECStatus SSLInt_AdvanceDtls13DecryptFailures(PRFileDesc* fd, PRUint64 to) {
+  sslSocket* ss = ssl_FindSocket(fd);
   if (!ss) {
     return SECFailure;
   }
 
   ssl_GetSpecWriteLock(ss);
-  ssl3CipherSpec *spec = ss->ssl3.crSpec;
+  ssl3CipherSpec* spec = ss->ssl3.crSpec;
   if (spec->cipherDef->type != type_aead) {
     ssl_ReleaseSpecWriteLock(ss);
     return SECFailure;
@@ -443,14 +497,14 @@ SECStatus SSLInt_AdvanceDtls13DecryptFailures(PRFileDesc *fd, PRUint64 to) {
 }
 
 SSLKEAType SSLInt_GetKEAType(SSLNamedGroup group) {
-  const sslNamedGroupDef *groupDef = ssl_LookupNamedGroup(group);
+  const sslNamedGroupDef* groupDef = ssl_LookupNamedGroup(group);
   if (!groupDef) return ssl_kea_null;
 
   return groupDef->keaType;
 }
 
-SECStatus SSLInt_SetSocketMaxEarlyDataSize(PRFileDesc *fd, uint32_t size) {
-  sslSocket *ss;
+SECStatus SSLInt_SetSocketMaxEarlyDataSize(PRFileDesc* fd, uint32_t size) {
+  sslSocket* ss;
 
   ss = ssl_FindSocket(fd);
   if (!ss) {
@@ -472,8 +526,8 @@ SECStatus SSLInt_SetSocketMaxEarlyDataSize(PRFileDesc *fd, uint32_t size) {
   return SECSuccess;
 }
 
-SECStatus SSLInt_HasPendingHandshakeData(PRFileDesc *fd, PRBool *pending) {
-  sslSocket *ss = ssl_FindSocket(fd);
+SECStatus SSLInt_HasPendingHandshakeData(PRFileDesc* fd, PRBool* pending) {
+  sslSocket* ss = ssl_FindSocket(fd);
   if (!ss) {
     return SECFailure;
   }
@@ -484,18 +538,85 @@ SECStatus SSLInt_HasPendingHandshakeData(PRFileDesc *fd, PRBool *pending) {
   return SECSuccess;
 }
 
-SECStatus SSLInt_SetRawEchConfigForRetry(PRFileDesc *fd, const uint8_t *buf,
+SECStatus SSLInt_SetRawEchConfigForRetry(PRFileDesc* fd, const uint8_t* buf,
                                          size_t len) {
-  sslSocket *ss = ssl_FindSocket(fd);
+  sslSocket* ss = ssl_FindSocket(fd);
   if (!ss) {
     return SECFailure;
   }
 
-  sslEchConfig *cfg = (sslEchConfig *)PR_LIST_HEAD(&ss->echConfigs);
+  sslEchConfig* cfg = (sslEchConfig*)PR_LIST_HEAD(&ss->echConfigs);
   SECITEM_FreeItem(&cfg->raw, PR_FALSE);
   SECITEM_AllocItem(NULL, &cfg->raw, len);
   PORT_Memcpy(cfg->raw.data, buf, len);
   return SECSuccess;
 }
 
-PRBool SSLInt_IsIp(PRUint8 *s, unsigned int len) { return tls13_IsIp(s, len); }
+const char* SSLInt_GetEchConfigPublicName(PRFileDesc* fd, unsigned int idx) {
+  sslSocket* ss = ssl_FindSocket(fd);
+  if (!ss) {
+    return NULL;
+  }
+  PRCList* cur = PR_LIST_HEAD(&ss->echConfigs);
+  for (unsigned int i = 0; i < idx; i++) {
+    cur = PR_NEXT_LINK(cur);
+    if (cur == &ss->echConfigs) {
+      return NULL;
+    }
+  }
+  if (cur == &ss->echConfigs) {
+    return NULL;
+  }
+  return ((sslEchConfig*)cur)->contents.publicName;
+}
+
+PRBool SSLInt_IsIp(PRUint8* s, unsigned int len) { return tls13_IsIp(s, len); }
+
+SECStatus SSLInt_GetCertificateCompressionAlgorithm(
+    PRFileDesc* fd, SSLCertificateCompressionAlgorithm* alg) {
+  sslSocket* ss = ssl_FindSocket(fd);
+  if (!ss) {
+    return SECFailure; /* Code already set. */
+  }
+
+  PRBool algFound = PR_FALSE;
+
+  if (!ssl_HaveXmitBufLock(ss)) {
+    ssl_GetSSL3HandshakeLock(ss);
+  }
+
+  if (!ss->xtnData.compressionAlg) {
+    if (!ssl_HaveXmitBufLock(ss)) {
+      ssl_ReleaseSSL3HandshakeLock(ss);
+    }
+
+    PORT_SetError(SEC_ERROR_INVALID_ARGS);
+    return SECFailure;
+  }
+  for (int i = 0; i < ss->ssl3.supportedCertCompressionAlgorithmsCount; i++) {
+    if (ss->ssl3.supportedCertCompressionAlgorithms[i].id ==
+        ss->xtnData.compressionAlg) {
+      *alg = ss->ssl3.supportedCertCompressionAlgorithms[i];
+      algFound = PR_TRUE;
+      break;
+    }
+  }
+
+  if (!ssl_HaveXmitBufLock(ss)) {
+    ssl_ReleaseSSL3HandshakeLock(ss);
+  }
+
+  if (algFound) {
+    return SECSuccess;
+  }
+  return SECFailure;
+}
+
+SECStatus SSLInt_SetEnableEchXtnCompression(PRFileDesc* fd, PRBool enabled) {
+  sslSocket* ss = ssl_FindSocket(fd);
+  if (!ss) {
+    return SECFailure;
+  }
+  ss->opt.enableEchXtnCompression = enabled;
+  return SECSuccess;
+}

@@ -16,6 +16,8 @@ include manifest.mn
 
 include $(CORE_DEPTH)/coreconf/config.mk
 
+include $(CORE_DEPTH)/lib/mozpkix/mozpkix_cxx.mk
+
 #######################################################################
 # (3) Include "component" configuration information. (OPTIONAL)       #
 ######################################################################
@@ -32,11 +34,7 @@ ifeq (,$(filter-out WIN%,$(OS_TARGET)))
 CSRCS	+= win32err.c
 DEFINES += -DIN_LIBSSL
 else
-ifeq ($(OS_TARGET),OS2)
-CSRCS	+= os2_err.c
-else
 CSRCS	+= unix_err.c
-endif
 endif
 
 # Enable key logging by default in debug builds, but not opt builds.

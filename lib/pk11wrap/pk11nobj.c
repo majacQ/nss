@@ -33,113 +33,10 @@
 
 extern const NSSError NSS_ERROR_NOT_FOUND;
 
-CK_TRUST
-pk11_GetTrustField(PK11SlotInfo *slot, PLArenaPool *arena,
-                   CK_OBJECT_HANDLE id, CK_ATTRIBUTE_TYPE type)
-{
-    CK_TRUST rv = 0;
-    SECItem item;
-
-    item.data = NULL;
-    item.len = 0;
-
-    if (SECSuccess == PK11_ReadAttribute(slot, id, type, arena, &item)) {
-        PORT_Assert(item.len == sizeof(CK_TRUST));
-        PORT_Memcpy(&rv, item.data, sizeof(CK_TRUST));
-        /* Damn, is there an endian problem here? */
-        return rv;
-    }
-
-    return 0;
-}
-
 PRBool
 pk11_HandleTrustObject(PK11SlotInfo *slot, CERTCertificate *cert, CERTCertTrust *trust)
 {
-    PLArenaPool *arena;
-
-    CK_ATTRIBUTE tobjTemplate[] = {
-        { CKA_CLASS, NULL, 0 },
-        { CKA_CERT_SHA1_HASH, NULL, 0 },
-    };
-
-    CK_OBJECT_CLASS tobjc = CKO_NSS_TRUST;
-    CK_OBJECT_HANDLE tobjID;
-    unsigned char sha1_hash[SHA1_LENGTH];
-
-    CK_TRUST serverAuth, codeSigning, emailProtection, clientAuth;
-
-    PK11_HashBuf(SEC_OID_SHA1, sha1_hash, cert->derCert.data, cert->derCert.len);
-
-    PK11_SETATTRS(&tobjTemplate[0], CKA_CLASS, &tobjc, sizeof(tobjc));
-    PK11_SETATTRS(&tobjTemplate[1], CKA_CERT_SHA1_HASH, sha1_hash,
-                  SHA1_LENGTH);
-
-    tobjID = pk11_FindObjectByTemplate(slot, tobjTemplate,
-                                       sizeof(tobjTemplate) / sizeof(tobjTemplate[0]));
-    if (CK_INVALID_HANDLE == tobjID) {
-        return PR_FALSE;
-    }
-
-    arena = PORT_NewArena(DER_DEFAULT_CHUNKSIZE);
-    if (NULL == arena)
-        return PR_FALSE;
-
-    /* Unfortunately, it seems that PK11_GetAttributes doesn't deal
-     * well with nonexistent attributes.  I guess we have to check
-     * the trust info fields one at a time.
-     */
-
-    /* We could verify CKA_CERT_HASH here */
-
-    /* We could verify CKA_EXPIRES here */
-
-    /* "Purpose" trust information */
-    serverAuth = pk11_GetTrustField(slot, arena, tobjID, CKA_TRUST_SERVER_AUTH);
-    clientAuth = pk11_GetTrustField(slot, arena, tobjID, CKA_TRUST_CLIENT_AUTH);
-    codeSigning = pk11_GetTrustField(slot, arena, tobjID, CKA_TRUST_CODE_SIGNING);
-    emailProtection = pk11_GetTrustField(slot, arena, tobjID,
-                                         CKA_TRUST_EMAIL_PROTECTION);
-    /* Here's where the fun logic happens.  We have to map back from the
-     * key usage, extended key usage, purpose, and possibly other trust values
-     * into the old trust-flags bits.  */
-
-    /* First implementation: keep it simple for testing.  We can study what other
-     * mappings would be appropriate and add them later.. fgmr 20000724 */
-
-    if (serverAuth == CKT_NSS_TRUSTED) {
-        trust->sslFlags |= CERTDB_TERMINAL_RECORD | CERTDB_TRUSTED;
-    }
-
-    if (serverAuth == CKT_NSS_TRUSTED_DELEGATOR) {
-        trust->sslFlags |= CERTDB_VALID_CA | CERTDB_TRUSTED_CA |
-                           CERTDB_NS_TRUSTED_CA;
-    }
-    if (clientAuth == CKT_NSS_TRUSTED_DELEGATOR) {
-        trust->sslFlags |= CERTDB_TRUSTED_CLIENT_CA;
-    }
-
-    if (emailProtection == CKT_NSS_TRUSTED) {
-        trust->emailFlags |= CERTDB_TERMINAL_RECORD | CERTDB_TRUSTED;
-    }
-
-    if (emailProtection == CKT_NSS_TRUSTED_DELEGATOR) {
-        trust->emailFlags |= CERTDB_VALID_CA | CERTDB_TRUSTED_CA | CERTDB_NS_TRUSTED_CA;
-    }
-
-    if (codeSigning == CKT_NSS_TRUSTED) {
-        trust->objectSigningFlags |= CERTDB_TERMINAL_RECORD | CERTDB_TRUSTED;
-    }
-
-    if (codeSigning == CKT_NSS_TRUSTED_DELEGATOR) {
-        trust->objectSigningFlags |= CERTDB_VALID_CA | CERTDB_TRUSTED_CA | CERTDB_NS_TRUSTED_CA;
-    }
-
-    /* There's certainly a lot more logic that can go here.. */
-
-    PORT_FreeArena(arena, PR_FALSE);
-
-    return PR_TRUE;
+    return nssTrust_HandleTrustForCERTCert(cert, trust);
 }
 
 static SECStatus
@@ -550,6 +447,34 @@ SEC_DeletePermCRL(CERTSignedCrl *crl)
     return (status == PR_SUCCESS) ? SECSuccess : SECFailure;
 }
 
+/* search with email with and without NULL
+ * The sql database accepts the email with a NULL as it's written,
+ * the dbm database strips the NULL on write so won't match if
+ * it's there on find */
+static CK_OBJECT_HANDLE
+pk11_FindSMimeObjectByTemplate(PK11SlotInfo *slot,
+                               CK_ATTRIBUTE *theTemplate, size_t tsize)
+{
+    CK_OBJECT_HANDLE smimeh = CK_INVALID_HANDLE;
+    CK_ATTRIBUTE *last;
+
+    PORT_Assert(tsize != 0);
+
+    smimeh = pk11_FindObjectByTemplate(slot, theTemplate, (int)tsize);
+    if (smimeh != CK_INVALID_HANDLE) {
+        return smimeh;
+    }
+    last = &theTemplate[tsize - 1];
+    if ((last->type == CKA_NSS_EMAIL) && (last->ulValueLen != 0)) {
+        CK_ULONG save_len = last->ulValueLen;
+        last->ulValueLen--;
+        smimeh = pk11_FindObjectByTemplate(slot, theTemplate, (int)tsize);
+        last->ulValueLen = save_len; /* restore the original */
+        return smimeh;
+    }
+    return CK_INVALID_HANDLE;
+}
+
 /*
  * return the certificate associated with a derCert
  */
@@ -559,8 +484,8 @@ PK11_FindSMimeProfile(PK11SlotInfo **slot, char *emailAddr,
 {
     CK_OBJECT_CLASS smimeClass = CKO_NSS_SMIME;
     CK_ATTRIBUTE theTemplate[] = {
-        { CKA_SUBJECT, NULL, 0 },
         { CKA_CLASS, NULL, 0 },
+        { CKA_SUBJECT, NULL, 0 },
         { CKA_NSS_EMAIL, NULL, 0 },
     };
     CK_ATTRIBUTE smimeData[] = {
@@ -579,15 +504,15 @@ PK11_FindSMimeProfile(PK11SlotInfo **slot, char *emailAddr,
         return NULL;
     }
 
-    PK11_SETATTRS(attrs, CKA_SUBJECT, name->data, name->len);
-    attrs++;
     PK11_SETATTRS(attrs, CKA_CLASS, &smimeClass, sizeof(smimeClass));
     attrs++;
-    PK11_SETATTRS(attrs, CKA_NSS_EMAIL, emailAddr, strlen(emailAddr));
+    PK11_SETATTRS(attrs, CKA_SUBJECT, name->data, name->len);
+    attrs++;
+    PK11_SETATTRS(attrs, CKA_NSS_EMAIL, emailAddr, strlen(emailAddr) + 1);
     attrs++;
 
     if (*slot) {
-        smimeh = pk11_FindObjectByTemplate(*slot, theTemplate, tsize);
+        smimeh = pk11_FindSMimeObjectByTemplate(*slot, theTemplate, tsize);
     } else {
         PK11SlotList *list = PK11_GetAllTokens(CKM_INVALID_MECHANISM,
                                                PR_FALSE, PR_TRUE, NULL);
@@ -598,7 +523,7 @@ PK11_FindSMimeProfile(PK11SlotInfo **slot, char *emailAddr,
         }
         /* loop through all the slots */
         for (le = list->head; le; le = le->next) {
-            smimeh = pk11_FindObjectByTemplate(le->slot, theTemplate, tsize);
+            smimeh = pk11_FindSMimeObjectByTemplate(le->slot, theTemplate, tsize);
             if (smimeh != CK_INVALID_HANDLE) {
                 *slot = PK11_ReferenceSlot(le->slot);
                 break;

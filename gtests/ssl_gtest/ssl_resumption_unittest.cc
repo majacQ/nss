@@ -24,6 +24,7 @@ extern "C" {
 #include "tls_filter.h"
 #include "tls_parser.h"
 #include "tls_protect.h"
+#include "pk11_import.h"
 
 namespace nss_test {
 
@@ -396,8 +397,8 @@ TEST_P(TlsConnectGeneric, ConnectResumeCorruptTicket) {
 
   ScopedPK11SlotInfo slot(PK11_GetInternalSlot());
   PK11SymKey* hmac_key =
-      PK11_ImportSymKey(slot.get(), CKM_SHA256_HMAC, PK11_OriginUnwrap,
-                        CKA_SIGN, &key_item, nullptr);
+      nss_test::ImportSymKey(slot.get(), CKM_SHA256_HMAC, PK11_OriginUnwrap,
+                             CKA_SIGN, &key_item, nullptr);
   ASSERT_NE(nullptr, hmac_key);
   SSLInt_SetSelfEncryptMacKey(hmac_key);
   ConfigureSessionCache(RESUME_BOTH, RESUME_TICKET);
@@ -453,7 +454,7 @@ TEST_P(TlsConnectGeneric, ServerSNICertTypeSwitch) {
   Connect();
   ScopedCERTCertificate cert2(SSL_PeerCertificate(client_->ssl_fd()));
   ASSERT_NE(nullptr, cert2.get());
-  CheckKeys(ssl_kea_ecdh, ssl_auth_ecdsa);
+  CheckKeys(ssl_auth_ecdsa);
   EXPECT_TRUE(SECITEM_ItemsAreEqual(&cert1->derCert, &cert2->derCert));
 }
 
@@ -613,7 +614,7 @@ TEST_P(TlsConnectGenericResumption, ResumeClientIncompatibleCipher) {
   client_->EnableSingleCipher(ChooseOneCipher(version_));
   Connect();
   SendReceive();
-  CheckKeys(ssl_kea_ecdh, ssl_auth_rsa_sign);
+  CheckKeys();
 
   Reset();
   ConfigureSessionCache(RESUME_BOTH, RESUME_TICKET);
@@ -628,7 +629,7 @@ TEST_P(TlsConnectGenericResumption, ResumeClientIncompatibleCipher) {
   auto ticket_capture =
       MakeTlsFilter<TlsExtensionCapture>(client_, ticket_extension);
   Connect();
-  CheckKeys(ssl_kea_ecdh, ssl_auth_rsa_sign);
+  CheckKeys();
   EXPECT_EQ(0U, ticket_capture->extension().len());
 }
 
@@ -655,7 +656,7 @@ TEST_P(TlsConnectStream, ResumptionOverrideCipher) {
   server_->EnableSingleCipher(ChooseOneCipher(version_));
   Connect();
   SendReceive();
-  CheckKeys(ssl_kea_ecdh, ssl_auth_rsa_sign);
+  CheckKeys();
 
   Reset();
   ConfigureSessionCache(RESUME_BOTH, RESUME_TICKET);
@@ -759,7 +760,7 @@ TEST_P(TlsConnectGenericPre13, TestResumptionOverrideVersion) {
   // Need to use a cipher that is plausible for the lower version.
   server_->EnableSingleCipher(TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA);
   Connect();
-  CheckKeys(ssl_kea_ecdh, ssl_auth_rsa_sign);
+  CheckKeys();
 
   Reset();
   ConfigureSessionCache(RESUME_BOTH, RESUME_TICKET);
@@ -793,8 +794,7 @@ TEST_F(TlsConnectTest, TestTls13ResumptionTwice) {
       MakeTlsFilter<TlsExtensionCapture>(client_, ssl_tls13_pre_shared_key_xtn);
   Connect();
   SendReceive();
-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_rsa_sign,
-            ssl_sig_rsa_pss_rsae_sha256);
+  CheckKeys(ssl_auth_rsa_sign, ssl_sig_rsa_pss_rsae_sha256);
   // The filter will go away when we reset, so save the captured extension.
   DataBuffer initialTicket(c1->extension());
   ASSERT_LT(0U, initialTicket.len());
@@ -811,8 +811,7 @@ TEST_F(TlsConnectTest, TestTls13ResumptionTwice) {
   ExpectResumption(RESUME_TICKET);
   Connect();
   SendReceive();
-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_rsa_sign,
-            ssl_sig_rsa_pss_rsae_sha256);
+  CheckKeys(ssl_auth_rsa_sign, ssl_sig_rsa_pss_rsae_sha256);
   ASSERT_LT(0U, c2->extension().len());
 
   ScopedCERTCertificate cert2(SSL_PeerCertificate(client_->ssl_fd()));
@@ -1089,7 +1088,7 @@ TEST_F(TlsConnectTest, TestTls13ResumptionDowngrade) {
   Handshake();
 
   SendReceive();
-  CheckKeys();
+  CheckKeys(ssl_kea_ecdh);
 }
 
 TEST_F(TlsConnectTest, TestTls13ResumptionForcedDowngrade) {
@@ -1144,15 +1143,15 @@ TEST_P(TlsConnectGenericResumption, ReConnectTicket) {
   server_->EnableSingleCipher(ChooseOneCipher(version_));
   Connect();
   SendReceive();
-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_rsa_sign,
-            ssl_sig_rsa_pss_rsae_sha256);
+  CheckKeys(ssl_auth_rsa_sign, ssl_sig_rsa_pss_rsae_sha256);
   // Resume
   Reset();
   ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
   ExpectResumption(RESUME_TICKET);
   Connect();
   // Only the client knows this.
-  CheckKeysResumption(ssl_kea_ecdh, ssl_grp_none, ssl_grp_ec_curve25519,
+  CheckKeysResumption(GetDefaultKEA(), ssl_grp_none,
+                      GetDefaultGroupFromKEA(GetDefaultKEA()),
                       ssl_auth_rsa_sign, ssl_sig_rsa_pss_rsae_sha256);
 }
 
@@ -1161,13 +1160,13 @@ TEST_P(TlsConnectGenericPre13, ReConnectCache) {
   server_->EnableSingleCipher(ChooseOneCipher(version_));
   Connect();
   SendReceive();
-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_rsa_sign,
-            ssl_sig_rsa_pss_rsae_sha256);
+  CheckKeys(ssl_auth_rsa_sign, ssl_sig_rsa_pss_rsae_sha256);
   // Resume
   Reset();
   ExpectResumption(RESUME_SESSIONID);
   Connect();
-  CheckKeysResumption(ssl_kea_ecdh, ssl_grp_none, ssl_grp_ec_curve25519,
+  CheckKeysResumption(GetDefaultKEA(), ssl_grp_none,
+                      GetDefaultGroupFromKEA(GetDefaultKEA()),
                       ssl_auth_rsa_sign, ssl_sig_rsa_pss_rsae_sha256);
 }
 
@@ -1176,15 +1175,15 @@ TEST_P(TlsConnectGenericResumption, ReConnectAgainTicket) {
   server_->EnableSingleCipher(ChooseOneCipher(version_));
   Connect();
   SendReceive();
-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_rsa_sign,
-            ssl_sig_rsa_pss_rsae_sha256);
+  CheckKeys(ssl_auth_rsa_sign, ssl_sig_rsa_pss_rsae_sha256);
   // Resume
   Reset();
   ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
   ExpectResumption(RESUME_TICKET);
   Connect();
   // Only the client knows this.
-  CheckKeysResumption(ssl_kea_ecdh, ssl_grp_none, ssl_grp_ec_curve25519,
+  CheckKeysResumption(GetDefaultKEA(), ssl_grp_none,
+                      GetDefaultGroupFromKEA(GetDefaultKEA()),
                       ssl_auth_rsa_sign, ssl_sig_rsa_pss_rsae_sha256);
   // Resume connection again
   Reset();
@@ -1192,7 +1191,8 @@ TEST_P(TlsConnectGenericResumption, ReConnectAgainTicket) {
   ExpectResumption(RESUME_TICKET, 2);
   Connect();
   // Only the client knows this.
-  CheckKeysResumption(ssl_kea_ecdh, ssl_grp_none, ssl_grp_ec_curve25519,
+  CheckKeysResumption(GetDefaultKEA(), ssl_grp_none,
+                      GetDefaultGroupFromKEA(GetDefaultKEA()),
                       ssl_auth_rsa_sign, ssl_sig_rsa_pss_rsae_sha256);
 }
 
@@ -1217,6 +1217,19 @@ void CheckGetInfoResult(PRTime now, uint32_t alpnSize, uint32_t earlyDataSize,
 
 // The client should generate a new, randomized session_id
 // when resuming using an external token.
+// Bytes to skip at the start of the token to reach the peerCert length
+// prefix.
+static size_t TokenHeaderSize(const std::vector<uint8_t>& token) {
+  if (token[0] != SSLResumptionTokenVersion) {
+    ADD_FAILURE() << "unhandled resumption token version "
+                  << unsigned(token[0]);
+    return 0;
+  }
+  return 1 /* version */ + 1 /* feature bitfield */ + 8 /* expirationTime */ +
+         8 /* received_timestamp */ + 4 /* ticket_lifetime_hint */ +
+         4 /* flags */ + 4 /* ticket_age_add */ + 4 /* max_early_data_size */;
+}
+
 TEST_P(TlsConnectGenericResumptionToken, CheckSessionId) {
   ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
   auto original_sid = MakeTlsFilter<CaptureSessionId>(client_);
@@ -1243,7 +1256,7 @@ TEST_P(TlsConnectGenericResumptionToken, CheckSessionId) {
   }
 }
 
-TEST_P(TlsConnectGenericResumptionToken, ConnectResumeGetInfo) {
+TEST_P(TlsConnectResumptionTokenShape, ConnectResumeGetInfo) {
   ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
   Connect();
   SendReceive();
@@ -1269,6 +1282,92 @@ TEST_P(TlsConnectGenericResumptionToken, ConnectResumeGetInfo) {
   CheckConnected();
 
   SendReceive();
+}
+
+TEST_P(TlsConnectGenericResumptionToken, GetInfoWithFlags) {
+  ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
+  Connect();
+  SendReceive();
+
+  const std::vector<uint8_t>& data = client_->GetResumptionToken();
+  ASSERT_FALSE(data.empty());
+  ScopedCERTCertificate cert(
+      PK11_FindCertFromNickname(server_->name().c_str(), nullptr));
+  ASSERT_NE(nullptr, cert.get());
+
+  SSLResumptionTokenInfo tokenInfo = {0};
+  ScopedSSLResumptionTokenInfo token(&tokenInfo);
+  ASSERT_EQ(SECSuccess, SSL_GetResumptionTokenInfoWithFlags(
+                            data.data(), static_cast<unsigned int>(data.size()),
+                            token.get(), sizeof(SSLResumptionTokenInfo), 0));
+  CheckGetInfoResult(now(), 0, 0, cert, token);
+
+  SSLResumptionTokenInfo noCertInfo = {0};
+  ScopedSSLResumptionTokenInfo noCert(&noCertInfo);
+  ASSERT_EQ(SECSuccess, SSL_GetResumptionTokenInfoWithFlags(
+                            data.data(), static_cast<unsigned int>(data.size()),
+                            noCert.get(), sizeof(SSLResumptionTokenInfo),
+                            SSL_RESUMPTION_TOKEN_INFO_NO_PEER_CERT));
+  EXPECT_EQ(nullptr, noCert->peerCert);
+  EXPECT_EQ(0U, noCert->alpnSelectionLen);
+  EXPECT_EQ(0U, noCert->maxEarlyDataSize);
+  EXPECT_EQ(token->expirationTime, noCert->expirationTime);
+
+  SSLResumptionTokenInfo badInfo = {0};
+  EXPECT_EQ(SECFailure,
+            SSL_GetResumptionTokenInfoWithFlags(
+                data.data(), static_cast<unsigned int>(data.size()), &badInfo,
+                sizeof(SSLResumptionTokenInfo), 0x80000000U));
+  EXPECT_EQ(SEC_ERROR_INVALID_ARGS, PORT_GetError());
+  EXPECT_EQ(nullptr, badInfo.peerCert);
+}
+
+TEST_P(TlsConnectGenericResumptionToken, RefuseLongWrappedMasterSecret) {
+  ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
+  client_->SetResumptionTokenCallback();
+  Connect();
+  SendReceive();
+
+  auto& token = client_->GetResumptionToken();
+  ASSERT_FALSE(token.empty());
+
+  // skip fixed-length fields at beginning
+  size_t off = TokenHeaderSize(token);
+  // skip peerCert (3-byte length prefix)
+  ASSERT_GE(token.size(), off + 3);
+  off += 3 + ((size_t(token[off]) << 16) | (size_t(token[off + 1]) << 8) |
+              size_t(token[off + 2]));
+  // skip peerCertStatus (2-byte length prefix)
+  ASSERT_GE(token.size(), off + 2);
+  off += 2 + ((size_t(token[off]) << 8) | size_t(token[off + 1]));
+  // skip urlSvrName (1-byte length prefix)
+  ASSERT_GE(token.size(), off + 1);
+  off += 1 + size_t(token[off]);
+  // skip localCert (3-byte length prefix)
+  ASSERT_GE(token.size(), off + 3);
+  off += 3 + ((size_t(token[off]) << 16) | (size_t(token[off + 1]) << 8) |
+              size_t(token[off + 2]));
+  // skip version, creationTime, authType, authKeyBits, keaType, keaKeyBits,
+  // keaGroup, and sigScheme (28 bytes)
+  off += 28;
+  // skip cipherSuite and extendedMasterSecretUsed (3 bytes)
+  off += 3;
+  // skip wrapped_master_secret (48 raw bytes)
+  off += 48;
+  ASSERT_GE(token.size(), off + 1);
+  // alter wrapped_master_secret_len to be too large
+  std::vector<uint8_t> crafted(token.begin(),
+                               token.begin() + static_cast<ptrdiff_t>(off));
+  crafted.push_back(0xff);
+  crafted.insert(crafted.end(), token.begin() + static_cast<ptrdiff_t>(off + 1),
+                 token.end());
+
+  Reset();
+  StartConnect();
+  ASSERT_EQ(SECFailure,
+            SSL_SetResumptionToken(client_->ssl_fd(), crafted.data(),
+                                   static_cast<unsigned int>(crafted.size())));
+  EXPECT_EQ(SSL_ERROR_BAD_RESUMPTION_TOKEN_ERROR, PORT_GetError());
 }
 
 TEST_P(TlsConnectGenericResumptionToken, RefuseExpiredTicketClient) {
@@ -1351,6 +1450,51 @@ TEST_P(TlsConnectGenericResumptionToken, ConnectResumeGetInfoAlpn) {
   CheckAlpn("a");
 
   SendReceive();
+}
+
+TEST_P(TlsConnectResumptionTokenShape, ConnectResumeTokenFormat) {
+  ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
+  Connect();
+  SendReceive();
+
+  const std::vector<uint8_t>& token = client_->GetResumptionToken();
+  ASSERT_FALSE(token.empty());
+
+  ASSERT_GE(token.size(), 2U);
+  EXPECT_EQ(static_cast<uint8_t>(SSLResumptionTokenVersion), token[0]);
+
+  SSLResumptionTokenInfo info = {0};
+  ASSERT_EQ(SECSuccess,
+            SSL_GetResumptionTokenInfo(token.data(),
+                                       static_cast<unsigned int>(token.size()),
+                                       &info, sizeof(info)));
+  ScopedSSLResumptionTokenInfo infoHolder(&info);
+
+  // A caller built against the struct before plaintextSecret existed must not
+  // have it written.
+  SSLResumptionTokenInfo oldInfo;
+  memset(&oldInfo, 0xa5, sizeof(oldInfo));
+  ASSERT_EQ(SECSuccess,
+            SSL_GetResumptionTokenInfo(
+                token.data(), static_cast<unsigned int>(token.size()), &oldInfo,
+                offsetof(SSLResumptionTokenInfo, plaintextSecret)));
+  ScopedSSLResumptionTokenInfo oldInfoHolder(&oldInfo);
+  const uint8_t* tail = reinterpret_cast<const uint8_t*>(&oldInfo) +
+                        offsetof(SSLResumptionTokenInfo, plaintextSecret);
+  for (size_t i = 0; i < sizeof(oldInfo.plaintextSecret); ++i) {
+    EXPECT_EQ(0xa5, tail[i]);
+  }
+
+  // FIPS does not allow raw key export, so the token falls back to the
+  // wrapped form.
+  if (shape() == TokenShape::kWrapped || PK11_IsFIPS()) {
+    EXPECT_EQ(0, token[1]);
+    EXPECT_EQ(PR_FALSE, info.plaintextSecret);
+    return;
+  }
+
+  EXPECT_EQ(SSLResumptionTokenFeatureRawMS, token[1]);
+  EXPECT_EQ(PR_TRUE, info.plaintextSecret);
 }
 
 TEST_P(TlsConnectTls13ResumptionToken, ConnectResumeGetInfoZeroRtt) {
@@ -1517,6 +1661,310 @@ TEST_F(TlsConnectStreamTls13, ExternalTokenWithPeerId) {
   ExpectResumption(RESUME_TICKET);
   Connect();
   SendReceive();
+}
+
+TEST_P(TlsConnectStreamTls13TokenHeader,
+       ResumptionTokenUrlSvrNameNotNullTerminated) {
+  ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
+  client_->SetResumptionTokenCallback();
+  Connect();
+  SendReceive();
+
+  const auto& token = client_->GetResumptionToken();
+  ASSERT_FALSE(token.empty());
+
+  size_t off = TokenHeaderSize(token);
+  // skip peerCert (3-byte length prefix)
+  ASSERT_GE(token.size(), off + 3);
+  off += 3 + ((size_t(token[off]) << 16) | (size_t(token[off + 1]) << 8) |
+              size_t(token[off + 2]));
+  // skip peerCertStatus (2-byte length prefix)
+  ASSERT_GE(token.size(), off + 2);
+  off += 2 + ((size_t(token[off]) << 8) | size_t(token[off + 1]));
+  // off is now the 1-byte urlSvrName length prefix.
+  ASSERT_GE(token.size(), off + 1);
+  size_t urlLen = token[off];
+  ASSERT_GT(urlLen, 0U);
+
+  // Overwrite urlSvrName bytes with 0x41 (no null terminator) and truncate
+  // right after the urlSvrName data. Without the fix, PORT_Strdup would scan
+  // past the end of the allocated buffer looking for a null byte.
+  std::vector<uint8_t> crafted(
+      token.begin(), token.begin() + static_cast<ptrdiff_t>(off + 1 + urlLen));
+  std::fill(crafted.begin() + static_cast<ptrdiff_t>(off + 1), crafted.end(),
+            0x41);
+
+  Reset();
+  StartConnect();
+  EXPECT_EQ(SECFailure,
+            SSL_SetResumptionToken(client_->ssl_fd(), crafted.data(),
+                                   static_cast<unsigned int>(crafted.size())));
+  EXPECT_EQ(SSL_ERROR_BAD_RESUMPTION_TOKEN_ERROR, PORT_GetError());
+}
+
+TEST_F(TlsConnectStreamTls13, ResumptionTokenUnknownFeatureBit) {
+  ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
+  client_->SetResumptionTokenCallback();
+  Connect();
+  SendReceive();
+
+  const auto& token = client_->GetResumptionToken();
+  ASSERT_GE(token.size(), 2U);
+  ASSERT_EQ(static_cast<uint8_t>(SSLResumptionTokenVersion), token[0]);
+
+  // A bit outside the supported set changes the layout of what follows, so the
+  // token has to be rejected rather than parsed.
+  std::vector<uint8_t> crafted(token);
+  crafted[1] = static_cast<uint8_t>(~SSLResumptionTokenSupportedFeatures);
+
+  Reset();
+  StartConnect();
+  EXPECT_EQ(SECFailure,
+            SSL_SetResumptionToken(client_->ssl_fd(), crafted.data(),
+                                   static_cast<unsigned int>(crafted.size())));
+  EXPECT_EQ(SSL_ERROR_BAD_RESUMPTION_TOKEN_ERROR, PORT_GetError());
+}
+
+TEST_F(TlsConnectStreamTls13, ResumptionTokenZeroFeatureBitfield) {
+  ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
+  client_->SetResumptionTokenCallback();
+  Connect();
+  SendReceive();
+
+  const std::vector<uint8_t> token = client_->GetResumptionToken();
+  ASSERT_GE(token.size(), 2U);
+  ASSERT_EQ(static_cast<uint8_t>(SSLResumptionTokenVersion), token[0]);
+  ASSERT_EQ(0, token[1]);
+
+  Reset();
+  ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
+  ExpectResumption(RESUME_TICKET);
+  StartConnect();
+  ASSERT_EQ(SECSuccess,
+            SSL_SetResumptionToken(client_->ssl_fd(), token.data(),
+                                   static_cast<unsigned int>(token.size())));
+  Handshake();
+  CheckConnected();
+  SendReceive();
+}
+
+TEST_F(TlsConnectStreamTls13, ResumptionTokenRawMasterSecretOverflow) {
+  // FIPS does not allow raw key export, so no RawMS token is produced.
+  if (PK11_IsFIPS()) {
+    GTEST_SKIP();
+  }
+
+  ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
+  client_->SetResumptionTokenCallback();
+  EXPECT_EQ(SECSuccess,
+            SSL_EnablePlaintextResumptionExport(client_->ssl_fd(), PR_TRUE));
+  Connect();
+  SendReceive();
+
+  const auto& token = client_->GetResumptionToken();
+  ASSERT_GE(token.size(), 2U);
+  ASSERT_EQ(SSLResumptionTokenFeatureRawMS, token[1]);
+
+  // Walk past the fixed and variable-length fields to reach the 1-byte length
+  // prefix of the raw master secret in the encoded token.
+  size_t off = TokenHeaderSize(token);
+  // peerCert (3-byte big-endian length prefix)
+  ASSERT_GE(token.size(), off + 3);
+  off += 3 + ((size_t(token[off]) << 16) | (size_t(token[off + 1]) << 8) |
+              size_t(token[off + 2]));
+  // peerCertStatus (2-byte big-endian length prefix)
+  ASSERT_GE(token.size(), off + 2);
+  off += 2 + ((size_t(token[off]) << 8) | size_t(token[off + 1]));
+  // urlSvrName (1-byte length prefix)
+  ASSERT_GE(token.size(), off + 1);
+  off += 1 + size_t(token[off]);
+  // localCert (3-byte big-endian length prefix)
+  ASSERT_GE(token.size(), off + 3);
+  off += 3 + ((size_t(token[off]) << 16) | (size_t(token[off + 1]) << 8) |
+              size_t(token[off + 2]));
+  // Fixed: version(2) + creationTime(8) + authType(2) + authKeyBits(4) +
+  //        keaType(2) + keaKeyBits(4) + keaGroup(3) + sigScheme(3) +
+  //        cipherSuite(2) + extendedMasterSecretUsed(1) = 31 bytes
+  off += 31;
+  // off now points to the 1-byte length prefix of the raw master secret.
+  ASSERT_GE(token.size(), off + 1);
+  size_t msLen = token[off];
+  ASSERT_GT(msLen, 0U);
+  ASSERT_LE(msLen, static_cast<size_t>(SSL3_MASTER_SECRET_LENGTH));
+  ASSERT_GE(token.size(), off + 1 + msLen);
+
+  // Grow the master secret to 0xff bytes (255 > SSL3_MASTER_SECRET_LENGTH),
+  // padding it in place so the fields after it still parse.
+  std::vector<uint8_t> crafted(token.begin(),
+                               token.begin() + static_cast<ptrdiff_t>(off));
+  crafted.push_back(0xff);
+  crafted.insert(crafted.end(), token.begin() + static_cast<ptrdiff_t>(off + 1),
+                 token.begin() + static_cast<ptrdiff_t>(off + 1 + msLen));
+  crafted.resize(crafted.size() + (0xff - msLen), 0);
+  crafted.insert(crafted.end(),
+                 token.begin() + static_cast<ptrdiff_t>(off + 1 + msLen),
+                 token.end());
+
+  SSLResumptionTokenInfo info;
+  EXPECT_EQ(SECFailure,
+            SSL_GetResumptionTokenInfo(
+                crafted.data(), static_cast<unsigned int>(crafted.size()),
+                &info, sizeof(info)));
+  EXPECT_EQ(SSL_ERROR_BAD_RESUMPTION_TOKEN_ERROR, PORT_GetError());
+
+  Reset();
+  StartConnect();
+  EXPECT_EQ(SECFailure,
+            SSL_SetResumptionToken(client_->ssl_fd(), crafted.data(),
+                                   static_cast<unsigned int>(crafted.size())));
+  EXPECT_EQ(SSL_ERROR_BAD_RESUMPTION_TOKEN_ERROR, PORT_GetError());
+}
+
+// A token carrying the master secret in cleartext can't be imported in FIPS
+// mode. FIPS mode never produces such a token, so build one from a wrapped
+// token by replacing the wrapped secret fields with a raw secret.
+TEST_F(TlsConnectStreamTls13, ResumptionTokenRawMasterSecretFips) {
+  ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
+  client_->SetResumptionTokenCallback();
+  Connect();
+  SendReceive();
+
+  const auto& token = client_->GetResumptionToken();
+  ASSERT_GE(token.size(), 2U);
+  ASSERT_EQ(0, token[1]);
+
+  size_t off = TokenHeaderSize(token);
+  // peerCert (3-byte big-endian length prefix)
+  ASSERT_GE(token.size(), off + 3);
+  off += 3 + ((size_t(token[off]) << 16) | (size_t(token[off + 1]) << 8) |
+              size_t(token[off + 2]));
+  // peerCertStatus (2-byte big-endian length prefix)
+  ASSERT_GE(token.size(), off + 2);
+  off += 2 + ((size_t(token[off]) << 8) | size_t(token[off + 1]));
+  // urlSvrName (1-byte length prefix)
+  ASSERT_GE(token.size(), off + 1);
+  off += 1 + size_t(token[off]);
+  // localCert (3-byte big-endian length prefix)
+  ASSERT_GE(token.size(), off + 3);
+  off += 3 + ((size_t(token[off]) << 16) | (size_t(token[off + 1]) << 8) |
+              size_t(token[off + 2]));
+  // Fixed: version(2) + creationTime(8) + authType(2) + authKeyBits(4) +
+  //        keaType(2) + keaKeyBits(4) + keaGroup(3) + sigScheme(3) +
+  //        cipherSuite(2) + extendedMasterSecretUsed(1) = 31 bytes
+  off += 31;
+  // off now points to the wrapped secret fields: wrapped_master_secret(48),
+  // wrapped_master_secret_len(1), masterWrapMech(8), masterModuleID(8),
+  // masterSlotID(8), masterWrapIndex(4), masterWrapSeries(2) = 79 bytes
+  const size_t wrappedFieldsLen = 79;
+  ASSERT_GE(token.size(), off + wrappedFieldsLen);
+  size_t msLen = token[off + 48];
+  ASSERT_GT(msLen, 0U);
+  ASSERT_LE(msLen, static_cast<size_t>(SSL3_MASTER_SECRET_LENGTH));
+
+  std::vector<uint8_t> crafted(token.begin(),
+                               token.begin() + static_cast<ptrdiff_t>(off));
+  crafted[1] = SSLResumptionTokenFeatureRawMS;
+  crafted.push_back(static_cast<uint8_t>(msLen));
+  crafted.insert(crafted.end(), msLen, 0x5a);
+  crafted.insert(crafted.end(),
+                 token.begin() + static_cast<ptrdiff_t>(off + wrappedFieldsLen),
+                 token.end());
+
+  // The info reports what the token carries, even where it can't be imported.
+  SSLResumptionTokenInfo info = {0};
+  ASSERT_EQ(SECSuccess,
+            SSL_GetResumptionTokenInfo(
+                crafted.data(), static_cast<unsigned int>(crafted.size()),
+                &info, sizeof(info)));
+  ScopedSSLResumptionTokenInfo infoHolder(&info);
+  EXPECT_EQ(PR_TRUE, info.plaintextSecret);
+
+  Reset();
+  StartConnect();
+  SECStatus rv =
+      SSL_SetResumptionToken(client_->ssl_fd(), crafted.data(),
+                             static_cast<unsigned int>(crafted.size()));
+  if (PK11_IsFIPS()) {
+    EXPECT_EQ(SECFailure, rv);
+    EXPECT_EQ(SSL_ERROR_BAD_RESUMPTION_TOKEN_ERROR, PORT_GetError());
+  } else {
+    EXPECT_EQ(SECSuccess, rv);
+  }
+}
+
+// Every proper prefix of a valid token has to be rejected, whichever field it
+// ends in.
+TEST_P(TlsConnectStreamTls13TokenHeader, ResumptionTokenTruncated) {
+  ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
+  Connect();
+  SendReceive();
+
+  const std::vector<uint8_t> token = client_->GetResumptionToken();
+  ASSERT_GE(token.size(), 2U);
+
+  for (size_t len = 1; len < token.size(); ++len) {
+    SSLResumptionTokenInfo info;
+    EXPECT_EQ(SECFailure, SSL_GetResumptionTokenInfo(
+                              token.data(), static_cast<unsigned int>(len),
+                              &info, sizeof(info)))
+        << "prefix of length " << len << " was accepted";
+  }
+
+  Reset();
+  StartConnect();
+  EXPECT_EQ(SECFailure, SSL_SetResumptionToken(
+                            client_->ssl_fd(), token.data(),
+                            static_cast<unsigned int>(token.size() - 1)));
+  EXPECT_EQ(SSL_ERROR_BAD_RESUMPTION_TOKEN_ERROR, PORT_GetError());
+}
+
+TEST_F(TlsConnectStreamTls13, ResumptionTokenEmptyPeerCert) {
+  ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
+  client_->SetResumptionTokenCallback();
+  Connect();
+  SendReceive();
+
+  const std::vector<uint8_t> token = client_->GetResumptionToken();
+  size_t off = TokenHeaderSize(token);
+  // peerCert (3-byte big-endian length prefix)
+  ASSERT_GE(token.size(), off + 3);
+  size_t certLen = (size_t(token[off]) << 16) | (size_t(token[off + 1]) << 8) |
+                   size_t(token[off + 2]);
+  ASSERT_GT(certLen, 0U);
+  ASSERT_GE(token.size(), off + 3 + certLen);
+
+  std::vector<uint8_t> crafted(token.begin(),
+                               token.begin() + static_cast<ptrdiff_t>(off));
+  crafted.insert(crafted.end(), 3, 0);
+  crafted.insert(crafted.end(),
+                 token.begin() + static_cast<ptrdiff_t>(off + 3 + certLen),
+                 token.end());
+
+  SSLResumptionTokenInfo info;
+  EXPECT_EQ(SECFailure,
+            SSL_GetResumptionTokenInfo(
+                crafted.data(), static_cast<unsigned int>(crafted.size()),
+                &info, sizeof(info)));
+}
+
+TEST_F(TlsConnectStreamTls13, ResumptionTokenUnknownVersion) {
+  ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
+  client_->SetResumptionTokenCallback();
+  Connect();
+  SendReceive();
+
+  const auto& token = client_->GetResumptionToken();
+  ASSERT_FALSE(token.empty());
+
+  std::vector<uint8_t> crafted(token);
+  crafted[0] = SSLResumptionTokenVersion + 1;
+
+  Reset();
+  StartConnect();
+  EXPECT_EQ(SECFailure,
+            SSL_SetResumptionToken(client_->ssl_fd(), crafted.data(),
+                                   static_cast<unsigned int>(crafted.size())));
+  EXPECT_EQ(SSL_ERROR_BAD_RESUMPTION_TOKEN_ERROR, PORT_GetError());
 }
 
 }  // namespace nss_test

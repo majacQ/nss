@@ -63,7 +63,14 @@
       'SHLIB_PREFIX=\"<(dll_prefix)\"',
       'NSS_SHLIB_VERSION=\"3\"',
       'SOFTOKEN_SHLIB_VERSION=\"3\"'
-    ]
+    ],
+    'conditions': [
+      [ 'fuzz_tls==1', {
+        'defines': [
+          'UNSAFE_FUZZER_MODE',
+        ],
+      }],
+    ],
   },
   'variables': {
     'module': 'nss'

@@ -36,6 +36,9 @@
 #include <sys/types.h>
 
 #include <ctype.h>
+/* ask for Annex K for memset_s. will set the appropriate #define
+ * if Annex K is supported */
+#define __STDC_WANT_LIB_EXT1__ 1
 #include <string.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -123,11 +126,18 @@ SEC_END_PROTOS
 /* Assert the current location can't be reached, passing a reason-string. */
 #define PORT_AssertNotReached(reasonStr) PR_NOT_REACHED(reasonStr)
 
+/* Like PORT_Assert, but checked in optimized builds too: on failure it prints
+ * the failed expression and location, then aborts. Use it for invariants
+ * whose violation means memory is already corrupt or freed (e.g. a reference
+ * count going negative), where continuing would be worse than crashing. */
+#define PORT_ReleaseAssert(_expr) \
+    ((_expr) ? ((void)0) : PR_Assert(#_expr, __FILE__, __LINE__))
+
 /* macros to handle endian based byte conversion */
 #define PORT_GET_BYTE_BE(value, offset, len) \
-    ((unsigned char)(((len) - (offset)-1) >= sizeof(value) ? 0 : (((value) >> (((len) - (offset)-1) * PR_BITS_PER_BYTE)) & 0xff)))
+    ((unsigned char)(((len) - (offset) - 1) >= sizeof(value) ? 0 : (((value) >> (((len) - (offset) - 1) * PR_BITS_PER_BYTE)) & 0xff)))
 #define PORT_GET_BYTE_LE(value, offset, len) \
-    ((unsigned char)((offset) > sizeof(value) ? 0 : (((value) >> ((offset)*PR_BITS_PER_BYTE)) & 0xff)))
+    ((unsigned char)((offset) > sizeof(value) ? 0 : (((value) >> ((offset) * PR_BITS_PER_BYTE)) & 0xff)))
 
 /* This runs a function that should return SECSuccess.
  * Intended for NSS internal use only.
@@ -175,11 +185,7 @@ SEC_END_PROTOS
 
 #define PORT_Memcmp memcmp
 #define PORT_Memcpy memcpy
-#ifndef SUNOS4
 #define PORT_Memmove memmove
-#else /*SUNOS4*/
-#define PORT_Memmove(s, ct, n) bcopy((ct), (s), (n))
-#endif /*SUNOS4*/
 #define PORT_Memset memset
 
 #define PORT_Strcasecmp PL_strcasecmp
@@ -259,9 +265,11 @@ sec_port_iso88591_utf8_conversion_function(
 
 extern int NSS_PutEnv(const char *envVarName, const char *envValue);
 
+extern void PORT_SafeZero(void *p, size_t n);
 extern int NSS_SecureMemcmp(const void *a, const void *b, size_t n);
 extern unsigned int NSS_SecureMemcmpZero(const void *mem, size_t n);
 extern void NSS_SecureSelect(void *dest, const void *src0, const void *src1, size_t n, unsigned char b);
+extern PRBool NSS_GetSystemFIPSEnabled(void);
 
 /*
  * Load a shared library called "newShLibName" in the same directory as
@@ -364,5 +372,14 @@ SEC_END_PROTOS
 #define PORT_CT_LE(a, b) (~PORT_CT_GT(a, b))
 #define PORT_CT_TRUE (~0)
 #define PORT_CT_FALSE 0
+
+#ifdef CT_VERIF
+#include <valgrind/memcheck.h>
+#define NSS_CLASSIFY(buf, length) VALGRIND_MAKE_MEM_UNDEFINED(buf, length);
+#define NSS_DECLASSIFY(buf, length) VALGRIND_MAKE_MEM_DEFINED(buf, length);
+#else
+#define NSS_CLASSIFY(buf, length)
+#define NSS_DECLASSIFY(buf, length)
+#endif
 
 #endif /* _SECPORT_H_ */

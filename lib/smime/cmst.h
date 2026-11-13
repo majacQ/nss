@@ -63,6 +63,7 @@ typedef struct NSSCMSRecipientInfoStr NSSCMSRecipientInfo;
 
 typedef struct NSSCMSDigestedDataStr NSSCMSDigestedData;
 typedef struct NSSCMSEncryptedDataStr NSSCMSEncryptedData;
+typedef struct NSSCMSAuthEnvelopedDataStr NSSCMSAuthEnvelopedData;
 
 typedef struct NSSCMSGenericWrapperDataStr NSSCMSGenericWrapperData;
 
@@ -117,6 +118,7 @@ union NSSCMSContentUnion {
     NSSCMSDigestedData *digestedData;
     NSSCMSEncryptedData *encryptedData;
     NSSCMSEnvelopedData *envelopedData;
+    NSSCMSAuthEnvelopedData *authEnvelopedData;
     NSSCMSSignedData *signedData;
     NSSCMSGenericWrapperData *genericData;
     /* or anonymous pointer to something */
@@ -138,9 +140,9 @@ struct NSSCMSContentInfoStr {
     /* --------- local; not part of encoding --------- */
     PK11SymKey *bulkkey;                   /* bulk encryption key */
     int keysize;                           /* size of bulk encryption key
-                                           * (only used by creation code) */
+                                            * (only used by creation code) */
     SECOidTag contentEncAlgTag;            /* oid tag of encryption algorithm
-                                           * (only used by creation code) */
+                                            * (only used by creation code) */
     NSSCMSContentInfoPrivate *privateInfo; /* place for NSS private info */
     void *reserved;                        /* keep binary compatibility */
 };
@@ -273,6 +275,22 @@ struct NSSCMSOriginatorInfoStr {
     CERTCertificate **certs;
 };
 
+/* =============================================================================
+ * AUTHENTICATED ENVELOPED DATA (RFC 5083)
+ */
+struct NSSCMSAuthEnvelopedDataStr {
+    SECItem version;
+    NSSCMSOriginatorInfo *originatorInfo; /* optional */
+    NSSCMSRecipientInfo **recipientInfos;
+    NSSCMSContentInfo contentInfo;
+    NSSCMSAttribute **authAttrs; /* optional */
+    SECItem mac;
+    NSSCMSAttribute **unauthAttrs; /* optional */
+    /* --------- local; not part of encoding --------- */
+    NSSCMSMessage *cmsg;
+};
+#define NSS_CMS_AUTH_ENVELOPED_DATA_VERSION 0
+
 /* -----------------------------------------------------------------------------
  * key transport recipient info
  */
@@ -339,10 +357,17 @@ struct NSSCMSOriginatorIdentifierOrKeyStr {
 };
 typedef struct NSSCMSOriginatorIdentifierOrKeyStr NSSCMSOriginatorIdentifierOrKey;
 
+struct NSSCMSOtherKeyAttributeStr {
+    SECItem keyAttrId;
+    SECItem keyAttr; /* optional */
+};
+
+typedef struct NSSCMSOtherKeyAttributeStr NSSCMSOtherKeyAttribute;
+
 struct NSSCMSRecipientKeyIdentifierStr {
     SECItem *subjectKeyIdentifier;
-    SECItem *date;  /* optional */
-    SECItem *other; /* optional */
+    SECItem *date;                  /* optional */
+    NSSCMSOtherKeyAttribute *other; /* optional */
 };
 typedef struct NSSCMSRecipientKeyIdentifierStr NSSCMSRecipientKeyIdentifier;
 
@@ -369,7 +394,7 @@ typedef struct NSSCMSRecipientEncryptedKeyStr NSSCMSRecipientEncryptedKey;
 struct NSSCMSKeyAgreeRecipientInfoStr {
     SECItem version;
     NSSCMSOriginatorIdentifierOrKey originatorIdentifierOrKey;
-    SECItem *ukm; /* optional */
+    SECItem ukm; /* optional */
     SECAlgorithmID keyEncAlg;
     NSSCMSRecipientEncryptedKey **recipientEncryptedKeys;
 };
@@ -382,8 +407,8 @@ typedef struct NSSCMSKeyAgreeRecipientInfoStr NSSCMSKeyAgreeRecipientInfo;
  */
 struct NSSCMSKEKIdentifierStr {
     SECItem keyIdentifier;
-    SECItem *date;  /* optional */
-    SECItem *other; /* optional */
+    SECItem *date;                  /* optional */
+    NSSCMSOtherKeyAttribute *other; /* optional */
 };
 typedef struct NSSCMSKEKIdentifierStr NSSCMSKEKIdentifier;
 

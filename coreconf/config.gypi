@@ -7,7 +7,7 @@
     'variables': {
       'variables': {
         'variables': {
-          'python%': 'python',
+          'python%': 'python3',
         },
         # chromium uses pymod_do_main, but gyp doesn't set a sensible
         # Python sys.path (gyp_chromium does).
@@ -44,7 +44,7 @@
         }],
         ['OS=="win"', {
           'use_system_zlib%': 0,
-          'nspr_libs%': ['libnspr4.lib', 'libplc4.lib', 'libplds4.lib'],
+          'nspr_libs%': ['nspr4.lib', 'plc4.lib', 'plds4.lib'],
           'zlib_libs%': [],
           #TODO
           'moz_debug_flags%': '',
@@ -100,6 +100,10 @@
     'cc_is_clang%': '<(cc_is_clang)',
     'cc_is_gcc%': '<(cc_is_gcc)',
     'cc_use_gnu_ld%': '<(cc_use_gnu_ld)',
+    # Windows only: build with clang-cl, lld-link and llvm-lib from llvm_bindir
+    # (an absolute path) instead of MSVC. build.sh --clang-cl sets these.
+    'clang_cl%': 0,
+    'llvm_bindir%': '',
     # Some defaults
     'disable_arm_hw_aes%': 0,
     'disable_arm_hw_sha1%': 0,
@@ -107,6 +111,7 @@
     'disable_intel_hw_sha%': 0,
     'disable_tests%': 0,
     'disable_chachapoly%': 0,
+    'disable_dsa%': 0,
     'disable_deprecated_seed%': 0,
     'disable_deprecated_rc2%': 0,
     'disable_dbm%': 1,
@@ -120,6 +125,10 @@
     'moz_fold_libs%': 0,
     'moz_folded_library_name%': '',
     'sanitizer_flags%': 0,
+    # Windows only: the architecture suffix of clang-cl's ASan runtime
+    # libraries. build.sh sets this and puts the runtime's directory in
+    # the LIB environment variable.
+    'clang_rt_asan_arch%': '',
     'static_libs%': 0,
     'no_zdefs%': 0,
     'fuzz%': 0,
@@ -136,14 +145,17 @@
     'nss_include_dir%': '/usr/include/nss',
     'only_dev_random%': 1,
     'disable_fips%': 1,
+    'fips_module_id%': '',
     'mozpkix_only%': 0,
     'mozilla_central%': 0,
     'coverage%': 0,
     'softfp_cflags%': '',
     'enable_draft_hpke%': 0,
-    'force_integrated_as%': 0,
     'disable_ckbi%': 0,
     'ppc_abi%': 0,
+    'use_pkcs5_pbkd2_params2_only%': 0,
+    'nss_use_pkcs5_pbkd2_params2_only%': 0,
+    'softoken_use_pkcs5_pbkd2_params2_only%': 0,
   },
   'target_defaults': {
     # Settings specific to targets should go here.
@@ -165,10 +177,20 @@
           '<(nss_include_dir)',
         ],
       }],
+      [ 'disable_fips==0', {
+        'defines': [
+          'NSS_ENABLE_FIPS_INDICATORS',
+        ],
+      }],
       [ 'disable_fips==1', {
         'defines': [
           'NSS_FIPS_DISABLED',
           'NSS_NO_INIT_SUPPORT',
+        ],
+      }],
+      [ 'fips_module_id!=""', {
+        'defines': [
+          'NSS_FIPS_MODULE_ID="<(fips_module_id)"'
         ],
       }],
       [ 'OS!="android" and OS!="mac" and OS!="ios" and OS!="win"', {
@@ -187,9 +209,15 @@
           '-llog',
         ],
       }],
+      # Without this, NSPR's Windows headers mark PR_* dllimport, breaking a static link.
+      [ 'OS=="win"', {
+        'defines': [
+          '_NSPR_BUILD_',
+        ],
+      }],
       [ 'fuzz==1', {
         'variables': {
-          'debug_optimization_level%': '1',
+          'debug_optimization_level%': '3',
         },
       }],
       [ 'target_arch=="ia32" or target_arch=="x64"', {
@@ -362,7 +390,7 @@
           },
         },
         'xcode_settings': {
-          'CLANG_CXX_LANGUAGE_STANDARD': 'c++0x',
+          'CLANG_CXX_LANGUAGE_STANDARD': 'c++17',
           'OTHER_CFLAGS': [
             '-fPIC',
             '-fno-common',
@@ -424,7 +452,7 @@
               '-std=c99',
             ],
             'cflags_cc': [
-              '-std=c++11',
+              '-std=c++17',
             ],
             'conditions': [
               [ 'target_arch=="ia32"', {
@@ -487,6 +515,46 @@
               # The -L/usr/lib is redundant but innocuous: it's a default path.
               'LIBRARY_SEARCH_PATHS': ['/usr/lib <(sanitizer_flags)'],
             },
+            # gyp's Windows generator ignores cflags and ldflags. See
+            # clang_cl_sanitizers in coreconf/sanitizers.sh.
+            'msvs_settings': {
+              'VCCLCompilerTool': {
+                'AdditionalOptions': [
+                  '<@(sanitizer_flags)',
+                  '/clang:-fno-omit-frame-pointer',
+                  '/clang:-fno-optimize-sibling-calls',
+                ],
+              },
+            },
+            'conditions': [
+              # Link the ASan runtime as clang-cl would: the DLL's import
+              # library, the whole static thunk, and the SEH interceptor.
+              [ 'clang_rt_asan_arch!=""', {
+                'msvs_settings': {
+                  'VCLinkerTool': {
+                    'AdditionalOptions': [
+                      'clang_rt.asan_dynamic-<(clang_rt_asan_arch).lib',
+                      '-wholearchive:clang_rt.asan_dynamic_runtime_thunk-<(clang_rt_asan_arch).lib',
+                    ],
+                  },
+                },
+                'conditions': [
+                  [ 'target_arch=="ia32"', {
+                    'msvs_settings': {
+                      'VCLinkerTool': {
+                        'AdditionalOptions': [ '-include:___asan_seh_interceptor' ],
+                      },
+                    },
+                  }, {
+                    'msvs_settings': {
+                      'VCLinkerTool': {
+                        'AdditionalOptions': [ '-include:__asan_seh_interceptor' ],
+                      },
+                    },
+                  }],
+                ],
+              }],
+            ],
           }],
           [ 'emit_llvm==1', {
             'cflags': ['-flto'],
@@ -529,7 +597,6 @@
           [ 'OS=="win"', {
             'defines': [
               '_WINDOWS',
-              'WIN95',
               '_CRT_SECURE_NO_WARNINGS',
               '_CRT_NONSTDC_NO_WARNINGS',
             ],
@@ -575,6 +642,29 @@
                   },
                 },
               }],
+              [ 'target_arch=="arm64"', {
+                'msvs_configuration_platform': 'ARM64',
+                'msvs_settings': {
+                  'VCCLCompilerTool': {
+                    'PreprocessorDefinitions': [
+                      'WIN64',
+                      '_ARM64_',
+                      '__ARM_FEATURE_CRYPTO',
+                    ],
+                    'AdditionalOptions': [ '/EHsc' ],
+                  },
+                },
+                'conditions': [
+                  # gyp runs clang-cl with -m64, which alone means x86-64.
+                  [ 'clang_cl==1', {
+                    'msvs_settings': {
+                      'VCCLCompilerTool': {
+                        'AdditionalOptions': [ '--target=aarch64-pc-windows-msvc' ],
+                      },
+                    },
+                  }],
+                ],
+              }],
             ],
           }],
           [ 'disable_dbm==1', {
@@ -587,6 +677,11 @@
               'NSS_DISABLE_LIBPKIX',
             ],
           }],
+          [ 'disable_dsa==1', {
+            'defines': [
+              'NSS_DISABLE_DSA',
+            ],
+          }],
           [ 'disable_deprecated_seed==1', {
             'defines': [
               'NSS_DISABLE_DEPRECATED_SEED',
@@ -595,6 +690,23 @@
           [ 'disable_deprecated_rc2==1', {
             'defines': [
               'NSS_DISABLE_DEPRECATED_RC2',
+            ],
+          }],
+
+          [ 'use_pkcs5_pbkd2_params2_only==1', {
+            'defines': [
+              'NSS_USE_PKCS5_PBKD2_PARAMS2_ONLY',
+              'SOFTOKEN_USE_PKCS5_PBKD2_PARAMS2_ONLY',
+            ],
+          }],
+          [ 'nss_use_pkcs5_pbkd2_params2_only==1', {
+            'defines': [
+              'NSS_USE_PKCS5_PBKD2_PARAMS2_ONLY',
+            ],
+          }],
+          [ 'softoken_use_pkcs5_pbkd2_params2_only==1', {
+            'defines': [
+              'SOFTOKEN_USE_PKCS5_PBKD2_PARAMS2_ONLY',
             ],
           }],
         ],
@@ -670,6 +782,16 @@
     },
   },
   'conditions': [
+    # gyp's ninja generator only switches to clang-cl when CC names it here; it
+    # ignores CC in the environment on Windows. Every build file includes this
+    # one, which keeps the settings identical across them as gyp requires.
+    [ 'clang_cl==1', {
+      'make_global_settings': [
+        ['CC', '<(llvm_bindir)/clang-cl'],
+        ['LD', '<(llvm_bindir)/lld-link'],
+        ['AR', '<(llvm_bindir)/llvm-lib'],
+      ],
+    }],
     [ 'cc_use_gnu_ld==1 or OS=="solaris"', {
       'variables': {
         'process_map_file': ['/bin/sh', '-c', '/usr/bin/env grep -v ";-" >(mapfile) | sed -e "s,;+,," -e "s; DATA ;;" -e "s,;;,," -e "s,;.*,;," > >@(_outputs)'],

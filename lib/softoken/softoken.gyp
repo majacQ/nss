@@ -42,6 +42,15 @@
     {
       'target_name': 'softokn_base',
       'type': 'none',
+      'conditions': [
+        [ 'fuzz==1', {
+          'direct_dependent_settings': {
+            'defines': [
+              'SOFTOKEN_FUZZ',
+            ],
+          },
+        }],
+      ],
       'direct_dependent_settings': {
         'sources': [
           'fipsaudt.c',
@@ -49,6 +58,7 @@
           'fipstokn.c',
           'jpakesftk.c',
           'kbkdf.c',
+          'kem.c',
           'lowkey.c',
           'lowpbe.c',
           'padbuf.c',
@@ -71,7 +81,7 @@
             'sources': [
               'lgglue.c',
             ]
-          }]
+          }],
         ]
       },
     },

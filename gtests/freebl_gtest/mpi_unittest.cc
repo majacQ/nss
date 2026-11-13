@@ -28,6 +28,9 @@ void gettime(struct timespec* tp) {
 
   tp->tv_sec = mts.tv_sec;
   tp->tv_nsec = mts.tv_nsec;
+#elif defined(__ANDROID__)
+  // Bionic only has timespec_get from API level 29.
+  ASSERT_EQ(0, clock_gettime(CLOCK_REALTIME, tp));
 #else
   ASSERT_NE(0, timespec_get(tp, TIME_UTC));
 #endif
@@ -245,11 +248,12 @@ TEST_F(MPITest, MpiFixlenOctetsTooSmall) {
     mp_int a;
     ASSERT_EQ(MP_OKAY, mp_init(&a));
     ASSERT_EQ(MP_OKAY, mp_read_unsigned_octets(&a, ref.data(), ref.size()));
-#ifdef DEBUG
-    // ARGCHK maps to assert() in a debug build.
-    EXPECT_DEATH(mp_to_fixlen_octets(&a, buf, ref.size() - 1), "");
-#else
+#ifndef DEBUG
     EXPECT_EQ(MP_BADARG, mp_to_fixlen_octets(&a, buf, ref.size() - 1));
+#elif GTEST_HAS_DEATH_TEST
+    // ARGCHK maps to assert() in a debug build. gtest has no death tests on
+    // some platforms (iOS), so this goes unchecked there.
+    EXPECT_DEATH(mp_to_fixlen_octets(&a, buf, ref.size() - 1), "");
 #endif
     ASSERT_EQ(MP_OKAY, mp_to_fixlen_octets(&a, buf, ref.size()));
     ASSERT_EQ(0, memcmp(buf, ref.data(), ref.size()));
@@ -408,6 +412,40 @@ TEST_F(DISABLED_MPITest, MpiCmpConstTest) {
   mp_clear(&a);
   mp_clear(&b);
   mp_clear(&c);
+}
+
+// Bug 2020188: mp_div_d with q=NULL dereferenced q unconditionally when the
+// quotient was zero, causing a crash.  Use a=5, d=1000 (non-power-of-2) so
+// that |a| < d and the zero-quotient branch is taken.
+TEST_F(MPITest, MpiDivRemOnly) {
+  mp_int a;
+  mp_digit rem;
+  MP_DIGITS(&a) = 0;
+  ASSERT_EQ(MP_OKAY, mp_init(&a));
+  mp_read_radix(&a, "5", 16);
+  EXPECT_EQ(MP_OKAY, mp_div_d(&a, 1000, nullptr, &rem));
+  EXPECT_EQ((mp_digit)5, rem);
+  mp_clear(&a);
+}
+
+// Bug 2020188: SIGN(q) was set before s_mp_exch, making the normalization a
+// no-op, so a zero quotient from a negative input would retain the NEG sign.
+// Use a=-5, d=1000 (non-power-of-2) so that |a| < d.
+TEST_F(MPITest, MpiDivSignNormalization) {
+  mp_int a, q;
+  mp_digit rem;
+  MP_DIGITS(&a) = 0;
+  MP_DIGITS(&q) = 0;
+  ASSERT_EQ(MP_OKAY, mp_init(&a));
+  ASSERT_EQ(MP_OKAY, mp_init(&q));
+  mp_read_radix(&a, "5", 16);
+  mp_neg(&a, &a);  // a = -5
+  EXPECT_EQ(MP_OKAY, mp_div_d(&a, 1000, &q, &rem));
+  EXPECT_EQ(MP_EQ, mp_cmp_z(&q));
+  EXPECT_EQ((mp_sign)ZPOS, MP_SIGN(&q));
+  EXPECT_EQ((mp_digit)5, rem);
+  mp_clear(&a);
+  mp_clear(&q);
 }
 
 }  // namespace nss_test

@@ -9,12 +9,8 @@
 #endif
 
 #include "ecl-priv.h"
-#include "ecp.h"
-#include "mpi.h"
-#include "mplogic.h"
-#include "mpi-priv.h"
-#include "secmpi.h"
 #include "secitem.h"
+#include "secerr.h"
 #include "secport.h"
 #include <stdlib.h>
 #include <stdio.h>
@@ -95,6 +91,24 @@ ec_Curve25519_pt_validate(const SECItem *px)
 }
 
 /*
+ * scalar validation is not necessary.
+ */
+SECStatus
+ec_Curve25519_scalar_validate(const SECItem *scalar)
+{
+    if (!scalar || !scalar->data) {
+        PORT_SetError(SEC_ERROR_INVALID_ARGS);
+        return SECFailure;
+    }
+
+    if (scalar->len != 32) {
+        PORT_SetError(SEC_ERROR_BAD_KEY);
+        return SECFailure;
+    }
+    return SECSuccess;
+}
+
+/*
  * Scalar multiplication for Curve25519.
  * If P == NULL, the base point is used.
  * Returns X = k*P
@@ -117,10 +131,13 @@ ec_Curve25519_pt_mul(SECItem *X, SECItem *k, SECItem *P)
     if (k->len != 32) {
         return SECFailure;
     }
-
+#ifndef UNSAFE_FUZZER_MODE
     SECStatus rv = ec_Curve25519_mul(X->data, k->data, px);
     if (NSS_SecureMemcmpZero(X->data, X->len) == 0) {
         return SECFailure;
     }
     return rv;
+#else
+    return px != NULL;
+#endif
 }

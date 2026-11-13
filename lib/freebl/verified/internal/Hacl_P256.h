@@ -22,6 +22,7 @@
  * SOFTWARE.
  */
 
+
 #ifndef __internal_Hacl_P256_H
 #define __internal_Hacl_P256_H
 
@@ -38,15 +39,16 @@ extern "C" {
 #include "internal/Hacl_Krmllib.h"
 #include "internal/Hacl_Bignum_Base.h"
 #include "../Hacl_P256.h"
-//#include "lib_intrinsics.h"
+#include "lib_intrinsics.h"
 
 bool Hacl_Impl_P256_DH_ecp256dh_i(uint8_t *public_key, uint8_t *private_key);
 
 bool
 Hacl_Impl_P256_DH_ecp256dh_r(
-    uint8_t *shared_secret,
-    uint8_t *their_pubkey,
-    uint8_t *private_key);
+  uint8_t *shared_secret,
+  uint8_t *their_pubkey,
+  uint8_t *private_key
+);
 
 #if defined(__cplusplus)
 }

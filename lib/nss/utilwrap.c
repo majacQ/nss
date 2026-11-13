@@ -16,6 +16,7 @@
 #include "nssrwlk.h"
 #include "cert.h"
 #include "prerror.h"
+#include "nsshash.h"
 
 /* wrappers for implementation in libnssutil3 */
 #undef ATOB_AsciiToData
@@ -127,6 +128,10 @@
 #undef SGN_CopyDigestInfo
 #undef SGN_CreateDigestInfo
 #undef SGN_DestroyDigestInfo
+#undef HASH_GetHashTypeByOidTag
+#undef HASH_GetHashOidTagByHashType
+#undef HASH_GetHashOidTagByHMACOidTag
+#undef HASH_GetHMACOidTagByHashOidTag
 
 void *
 PORT_Alloc(size_t bytes)
@@ -838,10 +843,34 @@ NSSRWLock_HaveWriteLock(NSSRWLock *rwlock)
 }
 
 SECStatus
-__nss_InitLock(PZLock **ppLock, nssILockType ltype)
+__nss_InitLock(PRLock **ppLock)
 {
     PORT_SetError(PR_NOT_IMPLEMENTED_ERROR);
     return SECFailure;
+}
+
+HASH_HashType
+HASH_GetHashTypeByOidTag(SECOidTag hashOid)
+{
+    return HASH_GetHashTypeByOidTag_Util(hashOid);
+}
+
+SECOidTag
+HASH_GetHashOidTagByHashType(HASH_HashType type)
+{
+    return HASH_GetHashOidTagByHashType_Util(type);
+}
+
+SECOidTag
+HASH_GetHashOidTagByHMACOidTag(SECOidTag hmacOid)
+{
+    return HASH_GetHashOidTagByHMACOidTag_Util(hmacOid);
+}
+
+SECOidTag
+HASH_GetHMACOidTagByHashOidTag(SECOidTag hashOid)
+{
+    return HASH_GetHMACOidTagByHashOidTag_Util(hashOid);
 }
 
 /* templates duplicated in libnss3 and libnssutil3 */

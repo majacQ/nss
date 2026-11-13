@@ -9,6 +9,7 @@
 #include "stubs.h"
 #endif
 
+#include <limits.h>
 #include <stddef.h>
 
 #include "prcpucfg.h"
@@ -467,7 +468,7 @@ AESKeyWrap_Decrypt(AESKeyWrapContext *cx, unsigned char *output,
                            input, inputLen);
 }
 
-#define BLOCK_PAD_POWER2(x, bs) (((bs) - ((x) & ((bs)-1))) & ((bs)-1))
+#define BLOCK_PAD_POWER2(x, bs) (((bs) - ((x) & ((bs) - 1))) & ((bs) - 1))
 #define AES_KEY_WRAP_ICV2 0xa6, 0x59, 0x59, 0xa6
 #define AES_KEY_WRAP_ICV2_INT32 0xa65959a6
 #define AES_KEY_WRAP_ICV2_LEN 4
@@ -488,6 +489,16 @@ AESKeyWrap_EncryptKWP(AESKeyWrapContext *cx, unsigned char *output,
                       unsigned int *pOutputLen, unsigned int maxOutputLen,
                       const unsigned char *input, unsigned int inputLen)
 {
+    /*
+    **    inputLen + padLen + AES_KEY_WRAP_BLOCK_SIZE <= UINT_MAX;
+    **    padLen <= AES_KEY_WRAP_BLOCK_SIZE - 1;
+    **    =>
+    **    inputLen <= UINT_MAX - (2 * AES_KEY_WRAP_BLOCK_SIZE - 1)
+    */
+    if (inputLen > UINT_MAX - (2 * AES_KEY_WRAP_BLOCK_SIZE - 1)) {
+        PORT_SetError(SEC_ERROR_INPUT_LEN);
+        return SECFailure;
+    }
     unsigned int padLen = BLOCK_PAD_POWER2(inputLen, AES_KEY_WRAP_BLOCK_SIZE);
     unsigned int paddedInputLen = inputLen + padLen;
     unsigned int outLen = paddedInputLen + AES_KEY_WRAP_BLOCK_SIZE;
@@ -512,7 +523,7 @@ AESKeyWrap_EncryptKWP(AESKeyWrapContext *cx, unsigned char *output,
         PORT_Memcpy(iv + AES_KEY_WRAP_BLOCK_SIZE, input, inputLen);
         rv = AES_Encrypt(&cx->aescx, output, pOutputLen, maxOutputLen, iv,
                          outLen);
-        PORT_Memset(iv, 0, sizeof(iv));
+        PORT_SafeZero(iv, sizeof(iv));
         return rv;
     }
 
@@ -528,7 +539,7 @@ AESKeyWrap_EncryptKWP(AESKeyWrapContext *cx, unsigned char *output,
     PORT_ZFree(newBuf, paddedInputLen);
     /* a little overkill, we only need to clear out the length, but this
      * is easier to verify we got it all */
-    PORT_Memset(iv, 0, sizeof(iv));
+    PORT_SafeZero(iv, sizeof(iv));
     return rv;
 }
 
@@ -631,12 +642,12 @@ AESKeyWrap_DecryptKWP(AESKeyWrapContext *cx, unsigned char *output,
 loser:
     /* if we failed, make sure we don't return any data to the user */
     if ((rv != SECSuccess) && (output == newBuf)) {
-        PORT_Memset(newBuf, 0, paddedLen);
+        PORT_SafeZero(newBuf, paddedLen);
     }
     /* clear out CSP sensitive data from the heap and stack */
     if (allocBuf) {
         PORT_ZFree(allocBuf, paddedLen);
     }
-    PORT_Memset(iv, 0, sizeof(iv));
+    PORT_SafeZero(iv, sizeof(iv));
     return rv;
 }

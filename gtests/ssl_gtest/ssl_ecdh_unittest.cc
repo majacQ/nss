@@ -72,6 +72,35 @@ TEST_P(TlsConnectGeneric, ConnectEcdheP384Client) {
             ssl_sig_rsa_pss_rsae_sha256);
 }
 
+// The bug https://bugzilla.mozilla.org/show_bug.cgi?id=1818487 updates the
+// generation of transcript for DTLS1.3
+// The following three tests are used to check the correctness of the
+// transcript.
+TEST_P(TlsConnectGeneric,
+       ClientOfferTls11_Tls13ServerNegotiateEachVersionOneByOne_HRR) {
+  EnsureTlsSetup();
+  auto hrr_capture = MakeTlsFilter<TlsHandshakeRecorder>(
+      server_, kTlsHandshakeHelloRetryRequest);
+  const std::vector<SSLNamedGroup> groups = {ssl_grp_ec_secp384r1,
+                                             ssl_grp_ffdhe_2048};
+  server_->ConfigNamedGroups(groups);
+  // DTLS does not support 1.0
+  if (variant_ == ssl_variant_datagram) {
+    client_->SetVersionRange(SSL_LIBRARY_VERSION_TLS_1_1,
+                             SSL_LIBRARY_VERSION_TLS_1_3);
+  } else {
+    client_->SetVersionRange(SSL_LIBRARY_VERSION_TLS_1_0,
+                             SSL_LIBRARY_VERSION_TLS_1_3);
+  }
+  server_->SetVersionRange(version_, version_);
+  Connect();
+  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_secp384r1, ssl_auth_rsa_sign,
+            ssl_sig_rsa_pss_rsae_sha256);
+
+  EXPECT_EQ(version_ == SSL_LIBRARY_VERSION_TLS_1_3,
+            hrr_capture->buffer().len() != 0);
+}
+
 // This causes a HelloRetryRequest in TLS 1.3.  Earlier versions don't care.
 TEST_P(TlsConnectGeneric, ConnectEcdheP384Server) {
   EnsureTlsSetup();
@@ -192,16 +221,16 @@ TEST_P(TlsConnectGenericPre13, P384PriorityFromModelSocket) {
 
 class TlsKeyExchangeGroupCapture : public TlsHandshakeFilter {
  public:
-  TlsKeyExchangeGroupCapture(const std::shared_ptr<TlsAgent> &a)
+  TlsKeyExchangeGroupCapture(const std::shared_ptr<TlsAgent>& a)
       : TlsHandshakeFilter(a, {kTlsHandshakeServerKeyExchange}),
         group_(ssl_grp_none) {}
 
   SSLNamedGroup group() const { return group_; }
 
  protected:
-  virtual PacketFilter::Action FilterHandshake(const HandshakeHeader &header,
-                                               const DataBuffer &input,
-                                               DataBuffer *output) {
+  virtual PacketFilter::Action FilterHandshake(const HandshakeHeader& header,
+                                               const DataBuffer& input,
+                                               DataBuffer* output) {
     uint32_t value = 0;
     EXPECT_TRUE(input.Read(0, 1, &value));
     EXPECT_EQ(3U, value) << "curve type has to be 3";
@@ -461,7 +490,7 @@ TEST_P(TlsKeyExchangeTest13, EqualPriority13) {
 
   Connect();
 
-  CheckKeys();
+  CheckKeys(ssl_kea_ecdh, ssl_auth_rsa_sign);
   const std::vector<SSLNamedGroup> shares = {ssl_grp_ec_curve25519};
   CheckKEXDetails(client_groups, shares);
 }
@@ -512,13 +541,13 @@ TEST_P(TlsKeyExchangeTest13, MultipleClientShares) {
 // Replace the point in the client key exchange message with an empty one
 class ECCClientKEXFilter : public TlsHandshakeFilter {
  public:
-  ECCClientKEXFilter(const std::shared_ptr<TlsAgent> &client)
+  ECCClientKEXFilter(const std::shared_ptr<TlsAgent>& client)
       : TlsHandshakeFilter(client, {kTlsHandshakeClientKeyExchange}) {}
 
  protected:
-  virtual PacketFilter::Action FilterHandshake(const HandshakeHeader &header,
-                                               const DataBuffer &input,
-                                               DataBuffer *output) {
+  virtual PacketFilter::Action FilterHandshake(const HandshakeHeader& header,
+                                               const DataBuffer& input,
+                                               DataBuffer* output) {
     // Replace the client key exchange message with an empty point
     output->Allocate(1);
     output->Write(0, 0U, 1);  // set point length 0
@@ -529,13 +558,13 @@ class ECCClientKEXFilter : public TlsHandshakeFilter {
 // Replace the point in the server key exchange message with an empty one
 class ECCServerKEXFilter : public TlsHandshakeFilter {
  public:
-  ECCServerKEXFilter(const std::shared_ptr<TlsAgent> &server)
+  ECCServerKEXFilter(const std::shared_ptr<TlsAgent>& server)
       : TlsHandshakeFilter(server, {kTlsHandshakeServerKeyExchange}) {}
 
  protected:
-  virtual PacketFilter::Action FilterHandshake(const HandshakeHeader &header,
-                                               const DataBuffer &input,
-                                               DataBuffer *output) {
+  virtual PacketFilter::Action FilterHandshake(const HandshakeHeader& header,
+                                               const DataBuffer& input,
+                                               DataBuffer* output) {
     // Replace the server key exchange message with an empty point
     output->Allocate(4);
     output->Write(0, 3U, 1);  // named curve
@@ -562,16 +591,16 @@ TEST_P(TlsConnectGenericPre13, ConnectECDHEmptyClientPoint) {
 // Damage ECParams/ECPoint of a SKE.
 class ECCServerKEXDamager : public TlsHandshakeFilter {
  public:
-  ECCServerKEXDamager(const std::shared_ptr<TlsAgent> &server, ECType ec_type,
+  ECCServerKEXDamager(const std::shared_ptr<TlsAgent>& server, ECType ec_type,
                       SSLNamedGroup named_curve)
       : TlsHandshakeFilter(server, {kTlsHandshakeServerKeyExchange}),
         ec_type_(ec_type),
         named_curve_(named_curve) {}
 
  protected:
-  virtual PacketFilter::Action FilterHandshake(const HandshakeHeader &header,
-                                               const DataBuffer &input,
-                                               DataBuffer *output) {
+  virtual PacketFilter::Action FilterHandshake(const HandshakeHeader& header,
+                                               const DataBuffer& input,
+                                               DataBuffer* output) {
     size_t offset = 0;
     output->Allocate(5);
     offset = output->Write(offset, ec_type_, 1);
@@ -642,7 +671,7 @@ TEST_P(TlsConnectTls12, ConnectIncorrectSigAlg) {
 }
 
 static void CheckSkeSigScheme(
-    std::shared_ptr<TlsHandshakeRecorder> &capture_ske,
+    std::shared_ptr<TlsHandshakeRecorder>& capture_ske,
     uint16_t expected_scheme) {
   TlsParser parser(capture_ske->buffer());
   uint32_t tmp = 0;

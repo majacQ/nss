@@ -123,11 +123,15 @@ loser:
 void
 NSS_CMSSignerInfo_Destroy(NSSCMSSignerInfo *si)
 {
-    if (si->cert != NULL)
+    if (si->cert != NULL) {
         CERT_DestroyCertificate(si->cert);
+        si->cert = NULL;
+    }
 
-    if (si->certList != NULL)
+    if (si->certList != NULL) {
         CERT_DestroyCertificateList(si->certList);
+        si->certList = NULL;
+    }
 
     /* XXX storage ??? */
 }
@@ -204,8 +208,8 @@ NSS_CMSSignerInfo_Sign(NSSCMSSignerInfo *signerinfo, SECItem *digest,
         SECOID_DestroyAlgorithmID(&freeAlgID, PR_FALSE);
     }
 
-    signAlgTag = SEC_GetSignatureAlgorithmOidTag(SECKEY_GetPrivateKeyType(privkey),
-                                                 digestalgtag);
+    signAlgTag = SEC_GetSignatureAlgorithmOidTagByKey(privkey, NULL,
+                                                      digestalgtag);
     if (signAlgTag == SEC_OID_UNKNOWN) {
         PORT_SetError(SEC_ERROR_INVALID_ALGORITHM);
         goto loser;
@@ -221,6 +225,11 @@ NSS_CMSSignerInfo_Sign(NSSCMSSignerInfo *signerinfo, SECItem *digest,
     if (SECOID_SetAlgorithmID(poolp, &(signerinfo->digestEncAlg),
                               cmsSignAlgTag, NULL) != SECSuccess)
         goto loser;
+
+    if (!NSS_SMIMEUtil_SigningAllowed(&signerinfo->digestEncAlg)) {
+        PORT_SetError(SEC_ERROR_BAD_EXPORT_ALGORITHM);
+        goto loser;
+    }
 
     if (signerinfo->authAttr != NULL) {
         SECItem encoded_attrs;
@@ -245,17 +254,17 @@ NSS_CMSSignerInfo_Sign(NSSCMSSignerInfo *signerinfo, SECItem *digest,
         }
 
         /*
-     * Before encoding, reorder the attributes so that when they
-     * are encoded, they will be conforming DER, which is required
-     * to have a specific order and that is what must be used for
-     * the hash/signature.  We do this here, rather than building
-     * it into EncodeAttributes, because we do not want to do
-     * such reordering on incoming messages (which also uses
-     * EncodeAttributes) or our old signatures (and other "broken"
-     * implementations) will not verify.  So, we want to guarantee
-     * that we send out good DER encodings of attributes, but not
-     * to expect to receive them.
-     */
+         * Before encoding, reorder the attributes so that when they
+         * are encoded, they will be conforming DER, which is required
+         * to have a specific order and that is what must be used for
+         * the hash/signature.  We do this here, rather than building
+         * it into EncodeAttributes, because we do not want to do
+         * such reordering on incoming messages (which also uses
+         * EncodeAttributes) or our old signatures (and other "broken"
+         * implementations) will not verify.  So, we want to guarantee
+         * that we send out good DER encodings of attributes, but not
+         * to expect to receive them.
+         */
         if (NSS_CMSAttributeArray_Reorder(signerinfo->authAttr) != SECSuccess)
             goto loser;
 
@@ -378,18 +387,22 @@ NSS_CMSSignerInfo_Verify(NSSCMSSignerInfo *signerinfo,
         vs = NSSCMSVS_SignatureAlgorithmUnknown;
         goto loser;
     }
+    if (!NSS_SMIMEUtil_SigningAllowed(&signerinfo->digestEncAlg)) {
+        vs = NSSCMSVS_SignatureAlgorithmUnsupported;
+        goto loser;
+    }
 
     if (!NSS_CMSArray_IsEmpty((void **)signerinfo->authAttr)) {
         if (contentType) {
             /*
-         * Check content type
-         *
-         * RFC2630 sez that if there are any authenticated attributes,
-         * then there must be one for content type which matches the
-         * content type of the content being signed, and there must
-         * be one for message digest which matches our message digest.
-         * So check these things first.
-         */
+             * Check content type
+             *
+             * RFC2630 sez that if there are any authenticated attributes,
+             * then there must be one for content type which matches the
+             * content type of the content being signed, and there must
+             * be one for message digest which matches our message digest.
+             * So check these things first.
+             */
             attr = NSS_CMSAttributeArray_FindAttrByOidTag(signerinfo->authAttr,
                                                           SEC_OID_PKCS9_CONTENT_TYPE, PR_TRUE);
             if (attr == NULL) {
@@ -404,8 +417,8 @@ NSS_CMSSignerInfo_Verify(NSSCMSSignerInfo *signerinfo,
         }
 
         /*
-     * Check digest
-     */
+         * Check digest
+         */
         attr = NSS_CMSAttributeArray_FindAttrByOidTag(signerinfo->authAttr,
                                                       SEC_OID_PKCS9_MESSAGE_DIGEST, PR_TRUE);
         if (attr == NULL) {
@@ -424,13 +437,13 @@ NSS_CMSSignerInfo_Verify(NSSCMSSignerInfo *signerinfo,
         }
 
         /*
-     * Check signature
-     *
-     * The signature is based on a digest of the DER-encoded authenticated
-     * attributes.  So, first we encode and then we digest/verify.
-     * we trust the decoder to have the attributes in the right (sorted)
-     * order
-     */
+         * Check signature
+         *
+         * The signature is based on a digest of the DER-encoded authenticated
+         * attributes.  So, first we encode and then we digest/verify.
+         * we trust the decoder to have the attributes in the right (sorted)
+         * order
+         */
         encoded_attrs.data = NULL;
         encoded_attrs.len = 0;
 
@@ -444,8 +457,8 @@ NSS_CMSSignerInfo_Verify(NSSCMSSignerInfo *signerinfo,
 
         if (sigAlgTag == pubkAlgTag) {
             /* This is to handle cases in which signatureAlgorithm field
-	     * specifies the public key algorithm rather than a signature
-	     * algorithm. */
+             * specifies the public key algorithm rather than a signature
+             * algorithm. */
             vs = (VFY_VerifyDataDirect(encoded_attrs.data, encoded_attrs.len,
                                        publickey, &(signerinfo->encDigest), pubkAlgTag,
                                        digestalgtag, NULL, signerinfo->cmsg->pwfn_arg) != SECSuccess)
@@ -471,16 +484,16 @@ NSS_CMSSignerInfo_Verify(NSSCMSSignerInfo *signerinfo,
         SECItem *sig;
 
         /* No authenticated attributes.
-    ** The signature is based on the plain message digest.
-    */
+         ** The signature is based on the plain message digest.
+         */
         sig = &(signerinfo->encDigest);
         if (sig->len == 0)
             goto loser;
 
         if (sigAlgTag == pubkAlgTag) {
             /* This is to handle cases in which signatureAlgorithm field
-	     * specifies the public key algorithm rather than a signature
-	     * algorithm. */
+             * specifies the public key algorithm rather than a signature
+             * algorithm. */
             vs = (!digest ||
                   VFY_VerifyDigestDirect(digest, publickey, sig, pubkAlgTag,
                                          digestalgtag, signerinfo->cmsg->pwfn_arg) != SECSuccess)
@@ -499,26 +512,26 @@ NSS_CMSSignerInfo_Verify(NSSCMSSignerInfo *signerinfo,
     if (vs == NSSCMSVS_BadSignature) {
         int error = PORT_GetError();
         /*
-     * XXX Change the generic error into our specific one, because
-     * in that case we get a better explanation out of the Security
-     * Advisor.  This is really a bug in the PSM error strings (the
-     * "generic" error has a lousy/wrong message associated with it
-     * which assumes the signature verification was done for the
-     * purposes of checking the issuer signature on a certificate)
-     * but this is at least an easy workaround and/or in the
-     * Security Advisor, which specifically checks for the error
-     * SEC_ERROR_PKCS7_BAD_SIGNATURE and gives more explanation
-     * in that case but does not similarly check for
-     * SEC_ERROR_BAD_SIGNATURE.  It probably should, but then would
-     * probably say the wrong thing in the case that it *was* the
-     * certificate signature check that failed during the cert
-     * verification done above.  Our error handling is really a mess.
-     */
+         * XXX Change the generic error into our specific one, because
+         * in that case we get a better explanation out of the Security
+         * Advisor.  This is really a bug in the PSM error strings (the
+         * "generic" error has a lousy/wrong message associated with it
+         * which assumes the signature verification was done for the
+         * purposes of checking the issuer signature on a certificate)
+         * but this is at least an easy workaround and/or in the
+         * Security Advisor, which specifically checks for the error
+         * SEC_ERROR_PKCS7_BAD_SIGNATURE and gives more explanation
+         * in that case but does not similarly check for
+         * SEC_ERROR_BAD_SIGNATURE.  It probably should, but then would
+         * probably say the wrong thing in the case that it *was* the
+         * certificate signature check that failed during the cert
+         * verification done above.  Our error handling is really a mess.
+         */
         if (error == SEC_ERROR_BAD_SIGNATURE)
             PORT_SetError(SEC_ERROR_PKCS7_BAD_SIGNATURE);
         /*
-     * map algorithm failures to NSSCMSVS values
-     */
+         * map algorithm failures to NSSCMSVS values
+         */
         if ((error == SEC_ERROR_PKCS7_KEYALG_MISMATCH) ||
             (error == SEC_ERROR_INVALID_ALGORITHM)) {
             /* keep the same error code as 3.11 and before */
@@ -568,8 +581,8 @@ NSS_CMSSignerInfo_GetDigestAlg(NSSCMSSignerInfo *signerinfo)
     algtag = NSS_CMSUtil_MapSignAlgs(algdata->offset);
     if (algtag != algdata->offset) {
         /* if the tags don't match, then we must have received a signer
-     * algorithID. Now we need to get the oid data for the digest
-     * oid, which the rest of the code is expecting */
+         * algorithID. Now we need to get the oid data for the digest
+         * oid, which the rest of the code is expecting */
         algdata = SECOID_FindOIDByTag(algtag);
     }
 
@@ -739,16 +752,6 @@ SECStatus
 NSS_CMSSignerInfo_AddAuthAttr(NSSCMSSignerInfo *signerinfo, NSSCMSAttribute *attr)
 {
     return NSS_CMSAttributeArray_AddAttr(signerinfo->cmsg->poolp, &(signerinfo->authAttr), attr);
-}
-
-/*
- * NSS_CMSSignerInfo_AddUnauthAttr - add an attribute to the
- * unauthenticated attributes of "signerinfo".
- */
-SECStatus
-NSS_CMSSignerInfo_AddUnauthAttr(NSSCMSSignerInfo *signerinfo, NSSCMSAttribute *attr)
-{
-    return NSS_CMSAttributeArray_AddAttr(signerinfo->cmsg->poolp, &(signerinfo->unAuthAttr), attr);
 }
 
 /*
@@ -930,27 +933,6 @@ loser:
 }
 
 /*
- * NSS_CMSSignerInfo_AddCounterSignature - countersign a signerinfo
- *
- * 1. digest the DER-encoded signature value of the original signerinfo
- * 2. create new signerinfo with correct version, sid, digestAlg
- * 3. add message-digest authAttr, but NO content-type
- * 4. sign the authAttrs
- * 5. DER-encode the new signerInfo
- * 6. add the whole thing to original signerInfo's unAuthAttrs
- *    as a SEC_OID_PKCS9_COUNTER_SIGNATURE attribute
- *
- * XXXX give back the new signerinfo?
- */
-SECStatus
-NSS_CMSSignerInfo_AddCounterSignature(NSSCMSSignerInfo *signerinfo,
-                                      SECOidTag digestalg, CERTCertificate signingcert)
-{
-    /* XXXX TBD XXXX */
-    return SECFailure;
-}
-
-/*
  * XXXX the following needs to be done in the S/MIME layer code
  * after signature of a signerinfo is verified
  */
@@ -991,7 +973,7 @@ NSS_SMIMESignerInfo_SaveSMIMEProfile(NSSCMSSignerInfo *signerinfo)
 
     if (cert == NULL) {
         /* no preferred cert found?
-     * find the cert the signerinfo is signed with instead */
+         * find the cert the signerinfo is signed with instead */
         cert = NSS_CMSSignerInfo_GetSigningCertificate(signerinfo, certdb);
         if (cert == NULL || cert->emailAddr == NULL || !cert->emailAddr[0])
             return SECFailure;
@@ -999,8 +981,8 @@ NSS_SMIMESignerInfo_SaveSMIMEProfile(NSSCMSSignerInfo *signerinfo)
 
 /* verify this cert for encryption (has been verified for signing so far) */
 /* don't verify this cert for encryption. It may just be a signing cert.
-     * that's OK, we can still save the S/MIME profile. The encryption cert
-     * should have already been saved */
+ * that's OK, we can still save the S/MIME profile. The encryption cert
+ * should have already been saved */
 #ifdef notdef
     if (CERT_VerifyCert(certdb, cert, PR_TRUE, certUsageEmailRecipient, PR_Now(), signerinfo->cmsg->pwfn_arg, NULL) != SECSuccess) {
         if (must_free_cert)

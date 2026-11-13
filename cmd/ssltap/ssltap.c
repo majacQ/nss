@@ -120,15 +120,13 @@ DataBufferList clientstream, serverstream;
 #define PR_FPUTS(x) PR_fprintf(PR_STDOUT, x)
 
 #define GET_SHORT(x) ((PRUint16)(((PRUint16)((PRUint8 *)x)[0]) << 8) + ((PRUint16)((PRUint8 *)x)[1]))
-#define GET_24(x) ((PRUint32)(              \
-    (((PRUint32)((PRUint8 *)x)[0]) << 16) + \
-    (((PRUint32)((PRUint8 *)x)[1]) << 8) +  \
-    (((PRUint32)((PRUint8 *)x)[2]) << 0)))
-#define GET_32(x) ((PRUint32)(              \
-    (((PRUint32)((PRUint8 *)x)[0]) << 24) + \
-    (((PRUint32)((PRUint8 *)x)[1]) << 16) + \
-    (((PRUint32)((PRUint8 *)x)[2]) << 8) +  \
-    (((PRUint32)((PRUint8 *)x)[3]) << 0)))
+#define GET_24(x) ((PRUint32)((((PRUint32)((PRUint8 *)x)[0]) << 16) + \
+                              (((PRUint32)((PRUint8 *)x)[1]) << 8) +  \
+                              (((PRUint32)((PRUint8 *)x)[2]) << 0)))
+#define GET_32(x) ((PRUint32)((((PRUint32)((PRUint8 *)x)[0]) << 24) + \
+                              (((PRUint32)((PRUint8 *)x)[1]) << 16) + \
+                              (((PRUint32)((PRUint8 *)x)[2]) << 8) +  \
+                              (((PRUint32)((PRUint8 *)x)[3]) << 0)))
 
 void print_hex(int amt, unsigned char *buf);
 void read_stream_bytes(unsigned char *d, DataBufferList *db, int length);
@@ -1815,7 +1813,7 @@ print_ssl3_handshake(unsigned char *recordBuf,
             }
         } /* end of switch sslh.type */
         offset += sslh.length + 4;
-    }                         /* while */
+    } /* while */
     if (offset < recordLen) { /* stuff left over */
         unsigned int newMsgLen = recordLen - offset;
         if (!s->msgBuf) {

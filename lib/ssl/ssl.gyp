@@ -14,6 +14,7 @@
         'cmpcert.c',
         'dtlscon.c',
         'dtls13con.c',
+        'mozpkixwrappers.cpp',
         'prelib.c',
         'selfencrypt.c',
         'ssl3con.c',
@@ -51,6 +52,7 @@
         'tls13hkdf.c',
         'tls13psk.c',
         'tls13replay.c',
+        'tls13signature.c',
         'tls13subcerts.c',
       ],
       'conditions': [
@@ -80,6 +82,11 @@
       ],
       'dependencies': [
         '<(DEPTH)/exports.gyp:nss_exports',
+        '<(DEPTH)/exports.gyp:nss_mozpkix_exports',
+        '<(DEPTH)/lib/mozpkix/mozpkix.gyp:mozpkix_ssl',
+      ],
+      'includes': [
+        '../mozpkix/mozpkix_cxx.gypi',
       ],
     },
     {

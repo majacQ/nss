@@ -8,6 +8,7 @@
 #include "secasn1.h"
 #include "secitem.h"
 #include <stdarg.h>
+#include <limits.h>
 #include "secerr.h"
 #include "certi.h"
 
@@ -255,7 +256,7 @@ CERT_CreateRDN(PLArenaPool *arena, CERTAVA *ava0, ...)
         if (ava0) {
             count++;
             va_start(ap, ava0);
-            while ((ava = va_arg(ap, CERTAVA *)) != 0) {
+            while (va_arg(ap, CERTAVA *) != 0) {
                 count++;
             }
             va_end(ap);
@@ -348,7 +349,7 @@ CERT_CreateName(CERTRDN *rdn0, ...)
         } else {
             count = 1;
             va_start(ap, rdn0);
-            while ((rdn = va_arg(ap, CERTRDN *)) != 0) {
+            while (va_arg(ap, CERTRDN *) != 0) {
                 count++;
             }
             va_end(ap);
@@ -652,9 +653,18 @@ CERT_DecodeAVAValue(const SECItem *derAVAValue)
     }
 
     if (convert != conv_none) {
+        if (avaValue.len > UINT_MAX / 3) {
+            PORT_DestroyCheapArena(&tmpArena);
+            PORT_SetError(SEC_ERROR_INVALID_AVA);
+            return NULL;
+        }
         unsigned int utf8ValLen = avaValue.len * 3;
         unsigned char *utf8Val =
             (unsigned char *)PORT_ArenaZAlloc(&tmpArena.arena, utf8ValLen);
+        if (!utf8Val) {
+            PORT_DestroyCheapArena(&tmpArena);
+            return NULL;
+        }
 
         switch (convert) {
             case conv_ucs4:

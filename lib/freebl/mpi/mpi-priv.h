@@ -85,16 +85,8 @@ extern const float s_logv_2[];
 
 #define MP_MIN(a, b) (((a) < (b)) ? (a) : (b))
 #define MP_MAX(a, b) (((a) > (b)) ? (a) : (b))
-#define MP_HOWMANY(a, b) (((a) + (b)-1) / (b))
+#define MP_HOWMANY(a, b) (((a) + (b) - 1) / (b))
 #define MP_ROUNDUP(a, b) (MP_HOWMANY(a, b) * (b))
-
-/* }}} */
-
-/* {{{ Comparison constants */
-
-#define MP_LT -1
-#define MP_EQ 0
-#define MP_GT 1
 
 /* }}} */
 
@@ -158,7 +150,7 @@ mp_err s_mp_invmod_even_m(const mp_int *a, const mp_int *m, mp_int *c);
 
 #ifdef NSS_USE_COMBA
 PR_STATIC_ASSERT(sizeof(mp_digit) == 8);
-#define IS_POWER_OF_2(a) ((a) && !((a) & ((a)-1)))
+#define IS_POWER_OF_2(a) ((a) && !((a) & ((a) - 1)))
 
 void s_mp_mul_comba_4(const mp_int *A, const mp_int *B, mp_int *C);
 void s_mp_mul_comba_8(const mp_int *A, const mp_int *B, mp_int *C);
@@ -173,7 +165,7 @@ void s_mp_sqr_comba_32(const mp_int *A, mp_int *B);
 #endif /* end NSS_USE_COMBA */
 
 /* ------ mpv functions, operate on arrays of digits, not on mp_int's ------ */
-#if defined(__OS2__) && defined(__IBMC__)
+#if defined(__IBMC__)
 #define MPI_ASM_DECL __cdecl
 #else
 #define MPI_ASM_DECL
@@ -204,6 +196,9 @@ void MPI_ASM_DECL s_mpv_mul_d_add(const mp_digit *a, mp_size a_len,
 void MPI_ASM_DECL s_mpv_mul_d_add_prop(const mp_digit *a,
                                        mp_size a_len, mp_digit b,
                                        mp_digit *c);
+void MPI_ASM_DECL s_mpv_mul_d_add_propCT(const mp_digit *a,
+                                         mp_size a_len, mp_digit b,
+                                         mp_digit *c, mp_size c_len);
 void MPI_ASM_DECL s_mpv_sqr_add_prop(const mp_digit *a,
                                      mp_size a_len,
                                      mp_digit *sqrs);

@@ -15,9 +15,6 @@
 #include "tls_filter.h"
 #include "tls_parser.h"
 
-// This is an internal header, used to get DTLS_1_3_DRAFT_VERSION.
-#include "ssl3prot.h"
-
 extern "C" {
 // This is not something that should make you happy.
 #include "libssl_internals.h"
@@ -47,9 +44,17 @@ const std::string TlsAgent::kServerEcdsa521 = "ecdsa521";
 const std::string TlsAgent::kServerEcdhRsa = "ecdh_rsa";
 const std::string TlsAgent::kServerEcdhEcdsa = "ecdh_ecdsa";
 const std::string TlsAgent::kServerDsa = "dsa";
+const std::string TlsAgent::kServerMlDsa44 = "mldsa44";
+const std::string TlsAgent::kServerMlDsa65 = "mldsa65";
+const std::string TlsAgent::kServerMlDsa87 = "mldsa87";
+const std::string TlsAgent::kServerUnknownExt = "unknown_ext";
+const std::string TlsAgent::kServerUnknownCriticalExt = "unknown_critical_ext";
 const std::string TlsAgent::kDelegatorEcdsa256 = "delegator_ecdsa256";
 const std::string TlsAgent::kDelegatorRsae2048 = "delegator_rsae2048";
 const std::string TlsAgent::kDelegatorRsaPss2048 = "delegator_rsa_pss2048";
+const std::string TlsAgent::kDelegatorMlDsa44 = "delegator_mldsa44";
+const std::string TlsAgent::kDelegatorMlDsa65 = "delegator_mldsa65";
+const std::string TlsAgent::kDelegatorMlDsa87 = "delegator_mldsa87";
 
 static const uint8_t kCannedTls13ServerHello[] = {
     0x03, 0x03, 0x9c, 0xbc, 0x14, 0x9b, 0x0e, 0x2e, 0xfa, 0x0d, 0xf3,
@@ -445,20 +450,42 @@ bool TlsAgent::CheckClientAuthCallbacksCompleted(uint8_t expected) {
 }
 
 bool TlsAgent::GetPeerChainLength(size_t* count) {
-  CERTCertList* chain = SSL_PeerCertificateChain(ssl_fd());
-  if (!chain) return false;
-  *count = 0;
+  SECItemArray* rawChain = nullptr;
+  SECStatus rv = SSL_PeerCertificateChainDER(ssl_fd(), &rawChain);
+  ScopedSECItemArray chain(rawChain);
+  if (rv != SECSuccess) return false;
 
-  for (PRCList* cursor = PR_NEXT_LINK(&chain->list); cursor != &chain->list;
+  *count = chain->len;
+  return true;
+}
+
+void TlsAgent::CheckPeerChainFunctionConsistency() {
+  SECItemArray* rawDerChain = nullptr;
+  SECStatus rv = SSL_PeerCertificateChainDER(ssl_fd(), &rawDerChain);
+  ScopedSECItemArray derChain(rawDerChain);
+  PRErrorCode err1 = PR_GetError();
+  ScopedCERTCertList chain(SSL_PeerCertificateChain(ssl_fd()));
+  PRErrorCode err2 = PR_GetError();
+  if (rv != SECSuccess) {
+    ASSERT_EQ(nullptr, chain);
+    ASSERT_EQ(nullptr, derChain);
+    ASSERT_EQ(err1, SSL_ERROR_NO_CERTIFICATE);
+    ASSERT_EQ(err2, SSL_ERROR_NO_CERTIFICATE);
+    return;
+  }
+  ASSERT_NE(nullptr, chain);
+  ASSERT_NE(nullptr, derChain);
+
+  unsigned int count = 0;
+  for (PRCList* cursor = PR_NEXT_LINK(&chain->list);
+       count < derChain->len && cursor != &chain->list;
        cursor = PR_NEXT_LINK(cursor)) {
     CERTCertListNode* node = (CERTCertListNode*)cursor;
-    std::cerr << node->cert->subjectName << std::endl;
-    ++(*count);
+    EXPECT_TRUE(
+        SECITEM_ItemsAreEqual(&node->cert->derCert, &derChain->items[count]));
+    ++count;
   }
-
-  CERT_DestroyCertList(chain);
-
-  return true;
+  ASSERT_EQ(count, derChain->len);
 }
 
 void TlsAgent::CheckCipherSuite(uint16_t suite) {
@@ -493,16 +520,36 @@ void TlsAgent::DisableAllCiphers() {
   }
 }
 
-// Not actually all groups, just the onece that we are actually willing
+// Not actually all groups, just the ones that we are actually willing
 // to use.
 const std::vector<SSLNamedGroup> kAllDHEGroups = {
+    ssl_grp_ec_curve25519,
+    ssl_grp_ec_secp256r1,
+    ssl_grp_ec_secp384r1,
+    ssl_grp_ec_secp521r1,
+    ssl_grp_ffdhe_2048,
+    ssl_grp_ffdhe_3072,
+    ssl_grp_ffdhe_4096,
+    ssl_grp_ffdhe_6144,
+    ssl_grp_ffdhe_8192,
+    ssl_grp_kem_mlkem768x25519,
+    ssl_grp_kem_secp256r1mlkem768,
+    ssl_grp_kem_secp384r1mlkem1024,
+    ssl_grp_kem_mlkem1024,
+};
+
+const std::vector<SSLNamedGroup> kNonPQDHEGroups = {
     ssl_grp_ec_curve25519, ssl_grp_ec_secp256r1, ssl_grp_ec_secp384r1,
     ssl_grp_ec_secp521r1,  ssl_grp_ffdhe_2048,   ssl_grp_ffdhe_3072,
-    ssl_grp_ffdhe_4096,    ssl_grp_ffdhe_6144,   ssl_grp_ffdhe_8192};
+    ssl_grp_ffdhe_4096,    ssl_grp_ffdhe_6144,   ssl_grp_ffdhe_8192,
+};
 
 const std::vector<SSLNamedGroup> kECDHEGroups = {
-    ssl_grp_ec_curve25519, ssl_grp_ec_secp256r1, ssl_grp_ec_secp384r1,
-    ssl_grp_ec_secp521r1};
+    ssl_grp_ec_curve25519,          ssl_grp_ec_secp256r1,
+    ssl_grp_ec_secp384r1,           ssl_grp_ec_secp521r1,
+    ssl_grp_kem_mlkem768x25519,     ssl_grp_kem_secp256r1mlkem768,
+    ssl_grp_kem_secp384r1mlkem1024,
+};
 
 const std::vector<SSLNamedGroup> kFFDHEGroups = {
     ssl_grp_ffdhe_2048, ssl_grp_ffdhe_3072, ssl_grp_ffdhe_4096,
@@ -510,8 +557,22 @@ const std::vector<SSLNamedGroup> kFFDHEGroups = {
 
 // Defined because the big DHE groups are ridiculously slow.
 const std::vector<SSLNamedGroup> kFasterDHEGroups = {
-    ssl_grp_ec_curve25519, ssl_grp_ec_secp256r1, ssl_grp_ec_secp384r1,
-    ssl_grp_ffdhe_2048, ssl_grp_ffdhe_3072};
+    ssl_grp_ec_curve25519,
+    ssl_grp_ec_secp256r1,
+    ssl_grp_ec_secp384r1,
+    ssl_grp_ffdhe_2048,
+    ssl_grp_ffdhe_3072,
+    ssl_grp_kem_mlkem768x25519,
+    ssl_grp_kem_secp256r1mlkem768,
+    ssl_grp_kem_secp384r1mlkem1024,
+    ssl_grp_kem_mlkem1024,
+};
+
+const std::vector<SSLNamedGroup> kEcdhHybridGroups = {
+    ssl_grp_kem_mlkem768x25519,
+    ssl_grp_kem_secp256r1mlkem768,
+    ssl_grp_kem_secp384r1mlkem1024,
+};
 
 void TlsAgent::EnableCiphersByKeyExchange(SSLKEAType kea) {
   EXPECT_TRUE(EnsureTlsSetup());
@@ -539,6 +600,9 @@ void TlsAgent::EnableGroupsByKeyExchange(SSLKEAType kea) {
     case ssl_kea_ecdh:
       ConfigNamedGroups(kECDHEGroups);
       break;
+    case ssl_kea_ecdh_hybrid:
+      ConfigNamedGroups(kEcdhHybridGroups);
+      break;
     default:
       break;
   }
@@ -546,7 +610,9 @@ void TlsAgent::EnableGroupsByKeyExchange(SSLKEAType kea) {
 
 void TlsAgent::EnableGroupsByAuthType(SSLAuthType authType) {
   if (authType == ssl_auth_ecdh_rsa || authType == ssl_auth_ecdh_ecdsa ||
-      authType == ssl_auth_ecdsa || authType == ssl_auth_tls13_any) {
+      authType == ssl_auth_ecdsa || authType == ssl_auth_tls13_any ||
+      authType == ssl_auth_mldsa44 || authType == ssl_auth_mldsa65 ||
+      authType == ssl_auth_mldsa87) {
     ConfigNamedGroups(kECDHEGroups);
   }
 }
@@ -675,11 +741,15 @@ void TlsAgent::CheckKEA(SSLKEAType kea, SSLNamedGroup kea_group,
   if (kea_size == 0) {
     switch (kea_group) {
       case ssl_grp_ec_curve25519:
+      case ssl_grp_kem_mlkem768x25519:
         kea_size = 255;
         break;
+      case ssl_grp_kem_secp256r1mlkem768:
       case ssl_grp_ec_secp256r1:
+      case ssl_grp_kem_mlkem1024:
         kea_size = 256;
         break;
+      case ssl_grp_kem_secp384r1mlkem1024:
       case ssl_grp_ec_secp384r1:
         kea_size = 384;
         break;
@@ -960,14 +1030,14 @@ void TlsAgent::ValidateCipherSpecs() {
   // We use one ciphersuite in each direction.
   PRInt32 expected = 2;
   if (variant_ == ssl_variant_datagram) {
-    // For DTLS 1.3, the client retains the cipher spec for early data and the
-    // handshake so that it can retransmit EndOfEarlyData and its final flight.
-    // It also retains the handshake read cipher spec so that it can read ACKs
-    // from the server. The server retains the handshake read cipher spec so it
-    // can read the client's retransmitted Finished.
+    // For DTLS 1.3, the client retains the cipher spec for the handshake so
+    // that it can retransmit its final flight. It also retains the handshake
+    // read cipher spec so that it can read ACKs from the server. The server
+    // retains the handshake read cipher spec so it can read the client's
+    // retransmitted Finished.
     if (expected_version_ >= SSL_LIBRARY_VERSION_TLS_1_3) {
       if (role_ == CLIENT) {
-        expected = info_.earlyDataAccepted ? 5 : 4;
+        expected = 4;
       } else {
         expected = 3;
       }
@@ -1116,8 +1186,11 @@ void TlsAgent::Handshake() {
     return;
   }
 
-  LOG("Handshake failed with error " << PORT_ErrorToName(err) << ": "
-                                     << PORT_ErrorToString(err));
+  if (err != 0) {
+    LOG("Handshake failed with error " << PORT_ErrorToName(err) << ": "
+                                       << PORT_ErrorToString(err));
+  }
+
   error_code_ = err;
   SetState(STATE_ERROR);
 }
@@ -1236,9 +1309,14 @@ void TlsAgent::ReadBytes(size_t amount) {
       PRErrorCode err = 0;
       if (rv < 0) {
         err = PR_GetError();
-        LOG("Read error " << PORT_ErrorToName(err) << ": "
-                          << PORT_ErrorToString(err));
+        if (err != 0) {
+          LOG("Read error " << PORT_ErrorToName(err) << ": "
+                            << PORT_ErrorToString(err));
+        }
         if (err != PR_WOULD_BLOCK_ERROR && expect_readwrite_error_) {
+          if (ErrorIsFatal(err)) {
+            SetState(STATE_ERROR);
+          }
           error_code_ = err;
           expect_readwrite_error_ = false;
         }
@@ -1424,7 +1502,7 @@ DataBuffer TlsAgentTestBase::MakeCannedTls13ServerHello() {
     uint32_t v;
     EXPECT_TRUE(sh.Read(sh.len() - 2, 2, &v));
     EXPECT_EQ(static_cast<uint32_t>(SSL_LIBRARY_VERSION_TLS_1_3), v);
-    sh.Write(sh.len() - 2, 0x7f00 | DTLS_1_3_DRAFT_VERSION, 2);
+    sh.Write(sh.len() - 2, SSL_LIBRARY_VERSION_DTLS_1_3_WIRE, 2);
   }
   return sh;
 }

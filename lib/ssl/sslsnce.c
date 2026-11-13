@@ -45,7 +45,7 @@
  */
 #include "seccomon.h"
 
-#if defined(XP_UNIX) || defined(XP_WIN32) || defined(XP_OS2)
+#if defined(XP_UNIX) || defined(XP_WIN32)
 
 #include "cert.h"
 #include "ssl.h"
@@ -113,12 +113,12 @@ struct sidCacheEntryStr {
             /*  4 */ PRInt32 srvNameIndex;
             /* 32 */ PRUint8 srvNameHash[SHA256_LENGTH]; /* SHA256 name hash */
             /*  2 */ PRUint16 namedCurve;
-/*100 */} ssl3;
+        /*100 */ } ssl3;
 
-/* force sizeof(sidCacheEntry) to be a multiple of cache line size */
-struct {
-    /*116 */ PRUint8 filler[116]; /* 92+116==208, a multiple of 16 */
-} forceSize;
+        /* force sizeof(sidCacheEntry) to be a multiple of cache line size */
+        struct {
+            /*116 */ PRUint8 filler[116]; /* 92+116==208, a multiple of 16 */
+        } forceSize;
     } u;
 };
 typedef struct sidCacheEntryStr sidCacheEntry;
@@ -129,7 +129,7 @@ struct certCacheEntryStr {
     PRUint16 sessionIDLength;                /*    2 */
     PRUint8 sessionID[SSL3_SESSIONID_BYTES]; /*   32 */
     PRUint8 cert[SSL_MAX_CACHED_CERT_LEN];   /* 4060 */
-};                                           /* total   4096 */
+}; /* total   4096 */
 typedef struct certCacheEntryStr certCacheEntry;
 
 struct sidCacheLockStr {
@@ -241,8 +241,8 @@ static PRBool isMultiProcess = PR_FALSE;
 #define MAX_SID_CACHE_LOCKS 256
 #endif
 
-#define SID_HOWMANY(val, size) (((val) + ((size)-1)) / (size))
-#define SID_ROUNDUP(val, size) ((size)*SID_HOWMANY((val), (size)))
+#define SID_HOWMANY(val, size) (((val) + ((size) - 1)) / (size))
+#define SID_ROUNDUP(val, size) ((size) * SID_HOWMANY((val), (size)))
 
 static sslPID myPid;
 static PRUint32 ssl_max_sid_cache_locks = MAX_SID_CACHE_LOCKS;
@@ -262,7 +262,7 @@ struct inheritanceStr {
 
 typedef struct inheritanceStr inheritance;
 
-#if defined(_WIN32) || defined(XP_OS2)
+#if defined(_WIN32)
 
 #define DEFAULT_CACHE_DIRECTORY "\\temp"
 
@@ -276,7 +276,7 @@ typedef struct inheritanceStr inheritance;
 
 /************************************************************************/
 
-/* SSL Session Cache has a smaller set of functions to initialize than 
+/* SSL Session Cache has a smaller set of functions to initialize than
  * ssl does. some ssl_functions can't be initialized before NSS has been
  * initialized, and the cache may be configured before NSS is initialized
  * so thus the special init function */
@@ -342,16 +342,16 @@ UnlockSet(cacheDesc *cache, PRUint32 set)
 /************************************************************************/
 
 /* Put a certificate in the cache.  Update the cert index in the sce.
-*/
+ */
 static PRUint32
-CacheCert(cacheDesc *cache, CERTCertificate *cert, sidCacheEntry *sce)
+CacheCert(cacheDesc *cache, const SECItem *derCert, sidCacheEntry *sce)
 {
     PRUint32 now;
     certCacheEntry cce;
 
-    if ((cert->derCert.len > SSL_MAX_CACHED_CERT_LEN) ||
-        (cert->derCert.len <= 0) ||
-        (cert->derCert.data == NULL)) {
+    if ((derCert->len > SSL_MAX_CACHED_CERT_LEN) ||
+        (derCert->len <= 0) ||
+        (derCert->data == NULL)) {
         PORT_SetError(SEC_ERROR_INVALID_ARGS);
         return 0;
     }
@@ -359,8 +359,8 @@ CacheCert(cacheDesc *cache, CERTCertificate *cert, sidCacheEntry *sce)
     cce.sessionIDLength = sce->sessionIDLength;
     PORT_Memcpy(cce.sessionID, sce->sessionID, cce.sessionIDLength);
 
-    cce.certLength = cert->derCert.len;
-    PORT_Memcpy(cce.cert, cert->derCert.data, cce.certLength);
+    cce.certLength = derCert->len;
+    PORT_Memcpy(cce.cert, derCert->data, cce.certLength);
 
     /* get lock on cert cache */
     now = LockSidCacheLock(cache->certCacheLock, 0);
@@ -399,7 +399,7 @@ Get32BitNameHash(const SECItem *name)
 }
 
 /* Put a name in the cache.  Update the cert index in the sce.
-*/
+ */
 static PRUint32
 CacheSrvName(cacheDesc *cache, SECItem *name, sidCacheEntry *sce)
 {
@@ -488,8 +488,7 @@ ConvertFromSID(sidCacheEntry *to, sslSessionID *from)
 static sslSessionID *
 ConvertToSID(sidCacheEntry *from,
              certCacheEntry *pcce,
-             srvNameCacheEntry *psnce,
-             CERTCertDBHandle *dbHandle)
+             srvNameCacheEntry *psnce)
 {
     sslSessionID *to;
 
@@ -532,12 +531,11 @@ ConvertToSID(sidCacheEntry *from,
     if (from->u.ssl3.certIndex != -1 && pcce) {
         SECItem derCert;
 
+        derCert.type = siBuffer;
         derCert.len = pcce->certLength;
         derCert.data = pcce->cert;
 
-        to->peerCert = CERT_NewTempCertificate(dbHandle, &derCert, NULL,
-                                               PR_FALSE, PR_TRUE);
-        if (to->peerCert == NULL)
+        if (SECITEM_CopyItem(NULL, &to->peerCertDER, &derCert) != SECSuccess)
             goto loser;
     }
     if (from->authType == ssl_auth_ecdsa ||
@@ -745,7 +743,7 @@ ServerSessionIDLookup(PRTime sslNow, const PRIPv6Addr *addr,
         /* sce conains a copy of the cache entry.
         ** Convert shared memory format to local format
         */
-        sid = ConvertToSID(&sce, pcce ? &cce : 0, psnce ? &snce : 0, dbHandle);
+        sid = ConvertToSID(&sce, pcce ? &cce : 0, psnce ? &snce : 0);
     }
     return sid;
 }
@@ -794,8 +792,8 @@ ssl_ServerCacheSessionID(sslSessionID *sid, PRTime creationTime)
         if (name->len && name->data) {
             now = CacheSrvName(cache, name, &sce);
         }
-        if (sid->peerCert != NULL) {
-            now = CacheCert(cache, sid->peerCert, &sce);
+        if (sid->peerCertDER.data != NULL) {
+            now = CacheCert(cache, &sid->peerCertDER, &sce);
         }
 
         set = SIDindex(cache, &sce.addr, sce.sessionID, sce.sessionIDLength);
@@ -861,21 +859,6 @@ ssl_ServerUncacheSessionID(sslSessionID *sid)
     sid->cached = invalid_cache;
     PORT_SetError(err);
 }
-
-#ifdef XP_OS2
-
-#define INCL_DOSPROCESS
-#include <os2.h>
-
-long
-gettid(void)
-{
-    PTIB ptib;
-    PPIB ppib;
-    DosGetInfoBlocks(&ptib, &ppib);
-    return ((long)ptib->tib_ordinal); /* thread id */
-}
-#endif
 
 static void
 CloseCache(cacheDesc *cache)
@@ -1056,9 +1039,6 @@ InitCache(cacheDesc *cache, int maxCacheEntries, int maxCertCacheEntries,
 #elif defined(XP_WIN32)
         cfn = PR_smprintf("%s/svrcache_%d_%x.ssl", directory, myPid,
                           GetCurrentThreadId());
-#elif defined(XP_OS2)
-        cfn = PR_smprintf("%s/svrcache_%d_%x.ssl", directory, myPid,
-                          gettid());
 #else
 #error "Don't know how to create file name for this platform!"
 #endif
@@ -1347,11 +1327,6 @@ SSL_InheritMPServerSIDCacheInstance(cacheDesc *cache, const char *envString)
     unsigned int decoLen;
     inheritance inherit;
     cacheDesc my;
-#ifdef WINNT
-    sidCacheLock *newLocks;
-    int locks_initialized = 0;
-    int locks_to_initialize = 0;
-#endif
     SECStatus status = ssl_InitSessionCache();
 
     if (status != SECSuccess) {
@@ -1453,48 +1428,6 @@ SSL_InheritMPServerSIDCacheInstance(cacheDesc *cache, const char *envString)
     cache->cacheMem = my.cacheMem;
     cache->sharedCache = (cacheDesc *)cache->cacheMem;
 
-#ifdef WINNT
-    /*  On Windows NT we need to "fix" the sidCacheLocks here to support fibers
-    **  When NT fibers are used in a multi-process server, a second level of
-    **  locking is needed to prevent a deadlock, in case a fiber acquires the
-    **  cross-process mutex, yields, and another fiber is later scheduled on
-    **  the same native thread and tries to acquire the cross-process mutex.
-    **  We do this by using a PRLock in the sslMutex. However, it is stored in
-    **  shared memory as part of sidCacheLocks, and we don't want to overwrite
-    **  the PRLock of the parent process. So we need to make new, private
-    **  copies of sidCacheLocks before modifying the sslMutex with our own
-    **  PRLock
-    */
-
-    /* note from jpierre : this should be free'd in child processes when
-    ** a function is added to delete the SSL session cache in the future.
-    */
-    locks_to_initialize = cache->numSIDCacheLocks + 3;
-    newLocks = PORT_NewArray(sidCacheLock, locks_to_initialize);
-    if (!newLocks)
-        goto loser;
-    /* copy the old locks */
-    memcpy(newLocks, cache->sidCacheLocks,
-           locks_to_initialize * sizeof(sidCacheLock));
-    cache->sidCacheLocks = newLocks;
-    /* fix the locks */
-    for (; locks_initialized < locks_to_initialize; ++locks_initialized) {
-        /* now, make a local PRLock in this sslMutex for this child process */
-        SECStatus err;
-        err = sslMutex_2LevelInit(&newLocks[locks_initialized].mutex);
-        if (err != SECSuccess) {
-            cache->numSIDCacheLocksInitialized = locks_initialized;
-            goto loser;
-        }
-    }
-    cache->numSIDCacheLocksInitialized = locks_initialized;
-
-    /* also fix the key and cert cache which use the last 2 lock entries */
-    cache->keyCacheLock = cache->sidCacheLocks + cache->numSIDCacheLocks;
-    cache->certCacheLock = cache->keyCacheLock + 1;
-    cache->srvNameCacheLock = cache->certCacheLock + 1;
-#endif
-
     PORT_Free(myEnvString);
     PORT_Free(decoString);
 
@@ -1569,7 +1502,7 @@ LockPoller(void *arg)
                 }
             }
         } /* end of loop over locks */
-    }     /* end of entire polling loop */
+    } /* end of entire polling loop */
 }
 
 /* Launch thread to poll cache for expired locks */
@@ -1708,17 +1641,16 @@ ssl_SetSelfEncryptKeyPair(SECKEYPublicKey *pubKey,
     SECKEYPrivateKey *privKeyCopy, *oldPrivKey;
 
     PORT_Assert(ssl_self_encrypt_key_pair.lock);
+    PR_RWLock_Wlock(ssl_self_encrypt_key_pair.lock);
     pubKeyCopy = SECKEY_CopyPublicKey(pubKey);
     privKeyCopy = SECKEY_CopyPrivateKey(privKey);
-
     if (!pubKeyCopy || !privKeyCopy) {
+        PR_RWLock_Unlock(ssl_self_encrypt_key_pair.lock);
         SECKEY_DestroyPublicKey(pubKeyCopy);
         SECKEY_DestroyPrivateKey(privKeyCopy);
         PORT_SetError(SEC_ERROR_NO_MEMORY);
         return SECFailure;
     }
-
-    PR_RWLock_Wlock(ssl_self_encrypt_key_pair.lock);
     oldPubKey = ssl_self_encrypt_key_pair.pubKey;
     oldPrivKey = ssl_self_encrypt_key_pair.privKey;
     ssl_self_encrypt_key_pair.pubKey = pubKeyCopy;
@@ -1878,8 +1810,6 @@ getSvrWrappingKey(unsigned int symWrapMechIndex,
                   cacheDesc *cache,
                   PRUint32 lockTime)
 {
-    PRUint32 ndx = (wrapKeyIndex * SSL_NUM_WRAP_MECHS) + symWrapMechIndex;
-    SSLWrappedSymWrappingKey *pwswk = cache->keyCacheData + ndx;
     PRUint32 now = 0;
     PRBool rv = SECFailure;
 
@@ -1887,6 +1817,10 @@ getSvrWrappingKey(unsigned int symWrapMechIndex,
         PORT_SetError(SSL_ERROR_SERVER_CACHE_NOT_CONFIGURED);
         return SECFailure;
     }
+
+    PRUint32 ndx = (wrapKeyIndex * SSL_NUM_WRAP_MECHS) + symWrapMechIndex;
+    SSLWrappedSymWrappingKey *pwswk = cache->keyCacheData + ndx;
+
     if (!lockTime) {
         now = LockSidCacheLock(cache->keyCacheLock, 0);
         if (!now) {

@@ -459,7 +459,7 @@ prf_final(prfContext *context, unsigned char *buf, unsigned int len)
  */
 CK_RV
 sftk_ike_prf(CK_SESSION_HANDLE hSession, const SFTKAttribute *inKey,
-             const CK_NSS_IKE_PRF_DERIVE_PARAMS *params, SFTKObject *outKey)
+             const CK_IKE_PRF_DERIVE_PARAMS *params, SFTKObject *outKey)
 {
     SFTKAttribute *newKeyValue = NULL;
     SFTKObject *newKeyObj = NULL;
@@ -469,6 +469,16 @@ sftk_ike_prf(CK_SESSION_HANDLE hSession, const SFTKAttribute *inKey,
     unsigned int macSize;
     CK_RV crv = CKR_OK;
     prfContext context;
+
+    /* Bound the caller-supplied nonce lengths so that ulNiLen + ulNrLen can
+     * never overflow or be truncated when stored in the unsigned-int
+     * newInKeySize used to size the Ni||Nr concatenation buffer below.
+     * IKE nonces are at most 256 octets (RFC 7296 section 2.10) and IKE
+     * payload length fields are 16-bit, so 0xffff is far above any
+     * legitimate value. */
+    if (params->ulNiLen > 0xffff || params->ulNrLen > 0xffff) {
+        return CKR_MECHANISM_PARAM_INVALID;
+    }
 
     crv = prf_setup(&context, params->prfMechanism);
     if (crv != CKR_OK) {
@@ -516,6 +526,12 @@ sftk_ike_prf(CK_SESSION_HANDLE hSession, const SFTKAttribute *inKey,
             goto fail;
         }
     } else {
+        /* ikev1 isn't validated, if we use this function in ikev1 mode,
+         * mark the resulting key as not FIPS */
+        if (!params->bRekey) {
+            sftk_setFIPS(outKey, PR_FALSE);
+        }
+
         crv = prf_init(&context, inKey->attrib.pValue,
                        inKey->attrib.ulValueLen);
         if (crv != CKR_OK) {
@@ -582,7 +598,7 @@ fail:
  */
 CK_RV
 sftk_ike1_prf(CK_SESSION_HANDLE hSession, const SFTKAttribute *inKey,
-              const CK_NSS_IKE1_PRF_DERIVE_PARAMS *params, SFTKObject *outKey,
+              const CK_IKE1_PRF_DERIVE_PARAMS *params, SFTKObject *outKey,
               unsigned int keySize)
 {
     SFTKAttribute *gxyKeyValue = NULL;
@@ -709,7 +725,7 @@ fail:
  */
 CK_RV
 sftk_ike1_appendix_b_prf(CK_SESSION_HANDLE hSession, const SFTKAttribute *inKey,
-                         const CK_NSS_IKE1_APP_B_PRF_DERIVE_PARAMS *params,
+                         const CK_IKE1_EXTENDED_DERIVE_PARAMS *params,
                          SFTKObject *outKey, unsigned int keySize)
 {
     SFTKAttribute *gxyKeyValue = NULL;
@@ -773,6 +789,12 @@ sftk_ike1_appendix_b_prf(CK_SESSION_HANDLE hSession, const SFTKAttribute *inKey,
     }
 
     outKeySize = PR_ROUNDUP(keySize, macSize);
+    /* Reject if PR_ROUNDUP overflowed 32-bit unsigned arithmetic, which
+     * would yield an undersized allocation for the loop below. */
+    if (outKeySize < keySize) {
+        crv = CKR_KEY_SIZE_RANGE;
+        goto fail;
+    }
     outKeyData = PORT_Alloc(outKeySize);
     if (outKeyData == NULL) {
         crv = CKR_HOST_MEMORY;
@@ -870,7 +892,7 @@ fail:
 static CK_RV
 sftk_ike_prf_plus_raw(CK_SESSION_HANDLE hSession,
                       const unsigned char *inKeyData, CK_ULONG inKeyLen,
-                      const CK_NSS_IKE_PRF_PLUS_DERIVE_PARAMS *params,
+                      const CK_IKE2_PRF_PLUS_DERIVE_PARAMS *params,
                       unsigned char **outKeyDataPtr, unsigned int *outKeySizePtr,
                       unsigned int keySize)
 {
@@ -915,6 +937,12 @@ sftk_ike_prf_plus_raw(CK_SESSION_HANDLE hSession,
         goto fail;
     }
     macSize = prf_length(&context);
+    /* RFC 7296 limits prf+ to 255 blocks; enforcing this up front also
+     * prevents 32-bit overflow in PR_ROUNDUP below. */
+    if (keySize > 255 * macSize) {
+        crv = CKR_KEY_SIZE_RANGE;
+        goto fail;
+    }
     outKeySize = PR_ROUNDUP(keySize, macSize);
     outKeyData = PORT_Alloc(outKeySize);
     if (outKeyData == NULL) {
@@ -923,11 +951,11 @@ sftk_ike_prf_plus_raw(CK_SESSION_HANDLE hSession,
     }
 
     /*
-      * this loop generates on block of the prf, basically
-      *   Tn = prf(key, Tn-1 | S | n)
-      *   Tn is thisKey, Tn-2 is lastKey, S is seedKey || seedData,
-      *   key is inKey. currentByte = n-1 on entry.
-      */
+     * this loop generates on block of the prf, basically
+     *   Tn = prf(key, Tn-1 | S | n)
+     *   Tn is thisKey, Tn-2 is lastKey, S is seedKey || seedData,
+     *   key is inKey. currentByte = n-1 on entry.
+     */
     thisKey = outKeyData;
     for (getKeySize = 0; getKeySize < keySize; getKeySize += macSize) {
         /* if currentByte is 255, we'll overflow when we increment it below.
@@ -999,7 +1027,7 @@ fail:
  */
 CK_RV
 sftk_ike_prf_plus(CK_SESSION_HANDLE hSession, const SFTKAttribute *inKey,
-                  const CK_NSS_IKE_PRF_PLUS_DERIVE_PARAMS *params, SFTKObject *outKey,
+                  const CK_IKE2_PRF_PLUS_DERIVE_PARAMS *params, SFTKObject *outKey,
                   unsigned int keySize)
 {
     unsigned char *outKeyData = NULL;
@@ -1347,7 +1375,7 @@ sftk_fips_IKE_PowerUpSelfTests(void)
     CK_RV crv;
     unsigned char *outKeyData = NULL;
     unsigned int outKeySize;
-    CK_NSS_IKE_PRF_PLUS_DERIVE_PARAMS ike_params;
+    CK_IKE2_PRF_PLUS_DERIVE_PARAMS ike_params;
 
     rv = prf_test(CKM_AES_XCBC_MAC,
                   ike_xcbc_known_key, sizeof(ike_xcbc_known_key),

@@ -140,8 +140,8 @@ if [ -z "${INIT_SOURCED}" -o "${INIT_SOURCED}" != "TRUE" ]; then
         echo "NSS_SSL_RUN=\"${NSS_SSL_RUN}\""
         echo "NSS_DEFAULT_DB_TYPE=${NSS_DEFAULT_DB_TYPE}"
         echo "export NSS_DEFAULT_DB_TYPE"
-        echo "NSS_ENABLE_PKIX_VERIFY=${NSS_ENABLE_PKIX_VERIFY}"
-        echo "export NSS_ENABLE_PKIX_VERIFY"
+        echo "NSS_DISABLE_PKIX_VERIFY=${NSS_DISABLE_PKIX_VERIFY}"
+        echo "export NSS_DISABLE_PKIX_VERIFY"
         echo "init_directories"
     }
 
@@ -168,17 +168,35 @@ if [ -z "${INIT_SOURCED}" -o "${INIT_SOURCED}" != "TRUE" ]; then
         esac
     }
 
+    # Returns 0 if no core file has appeared since the last scan, 1 otherwise.
+    #
+    # Called often enough that walking ${HOSTDIR} dominates runtime in suites
+    # with many files, so the walk is rate-limited to one every
+    # NSS_CORE_SCAN_INTERVAL seconds. Pass "force" to scan regardless, for
+    # checkpoints that have to be exact.
     detect_core()
     {
-        [ ! -f $CORELIST_FILE ] && touch $CORELIST_FILE
-        mv $CORELIST_FILE ${CORELIST_FILE}.old
-        coreStr=`find $HOSTDIR -type f -name '*core*'`
-        res=0
-        if [ -n "$coreStr" ]; then
-            sum $coreStr > $CORELIST_FILE
-            res=`cat $CORELIST_FILE ${CORELIST_FILE}.old | sort | uniq -u | wc -l`
+        [ "${NSS_DETECT_CORE}" = "1" ] || return 0
+        if [ "$1" != "force" -a -n "${_core_scanned_at}" ]; then
+            [ $(( SECONDS - _core_scanned_at )) -ge ${NSS_CORE_SCAN_INTERVAL} ] || return 0
         fi
-        return $res
+        _core_scanned_at=${SECONDS}
+
+        local cores seen=
+        cores=`find ${HOSTDIR} -type f -name '*core*'`
+        if [ -z "${cores}" ]; then
+            [ -f "${CORELIST_FILE}" ] && rm -f ${CORELIST_FILE}
+            return 0
+        fi
+
+        # Checksum rather than just list the paths, so that a core overwritten
+        # in place is still reported.
+        cores=`sum ${cores}`
+        [ -f "${CORELIST_FILE}" ] && seen=`cat ${CORELIST_FILE}`
+        [ "${cores}" = "${seen}" ] && return 0
+
+        echo "${cores}" > ${CORELIST_FILE}
+        return 1
     }
 
 #html functions to give the resultfiles a consistant look
@@ -225,16 +243,23 @@ if [ -z "${INIT_SOURCED}" -o "${INIT_SOURCED}" != "TRUE" ]; then
         html "<TR><TD>#${MSG_ID}: $1 ${HTML_UNKNOWN}"
         echo "${SCRIPTNAME}: #${MSG_ID}: $* - UNKNOWN"
     }
+    # Returns 1, so that callers skip their own result line.
+    html_report_core()
+    {
+        increase_msg_id
+        html "<TR><TD>#${MSG_ID}: $* ${HTML_FAILED_CORE}"
+        echo "${SCRIPTNAME}: #${MSG_ID}: $* - Core file is detected - FAILED"
+        return 1
+    }
     html_detect_core()
     {
-        detect_core
-        if [ $? -ne 0 ]; then
-            increase_msg_id
-            html "<TR><TD>#${MSG_ID}: $* ${HTML_FAILED_CORE}"
-            echo "${SCRIPTNAME}: #${MSG_ID}: $* - Core file is detected - FAILED"
-            return 1
-        fi
-        return 0
+        detect_core || html_report_core "$@"
+    }
+    # As html_detect_core, but ignores the scan rate limit. Use where a core
+    # has to be attributed to this exact point rather than a later test.
+    html_detect_core_force()
+    {
+        detect_core force || html_report_core "$@"
     }
     html_head()
     {
@@ -260,8 +285,9 @@ if [ -z "${INIT_SOURCED}" -o "${INIT_SOURCED}" != "TRUE" ]; then
     gtest_parse_report_helper()
     {
       # Check XML reports for normal test runs and failures.
-      local successes=$(gtest_parse_report_xpath "//testcase[@status='run'][count(*)=0]" "$@" )
-      local failures=$(gtest_parse_report_xpath "//failure/.." "$@" )
+      local successes failures
+      successes=$(gtest_parse_report_xpath "//testcase[@status='run'][count(*)=0]" "$@" )
+      failures=$(gtest_parse_report_xpath "//failure/.." "$@" )
 
       # Print all tests that succeeded.
       while read result name; do
@@ -322,7 +348,106 @@ if [ -z "${INIT_SOURCED}" -o "${INIT_SOURCED}" != "TRUE" ]; then
       fi
     }
 
+    save_pkcs11()
+    {
+      outdir="$1"
+      cp ${outdir}/pkcs11.txt ${outdir}/pkcs11.txt.sav
+    }
 
+    restore_pkcs11()
+    {
+      outdir="$1"
+      cp ${outdir}/pkcs11.txt.sav ${outdir}/pkcs11.txt
+    }
+
+    # create a new pkcs11.txt with and explict policy. overwrites
+    # the existing pkcs11
+    setup_policy()
+    {
+      policy="$1"
+      outdir="$2"
+      OUTFILE="${outdir}/pkcs11.txt"
+      if [ -z "${ROOTCERTSFILE}" ]; then
+        ROOTCERTSFILE=`ls -1 ${DIST}/${OBJDIR}/lib/*nssckbi.* | head -1`
+        ROOTCERTSFILE=`native_path "${ROOTCERTSFILE}"`
+      fi
+      cat > "$OUTFILE" << ++EOF++
+library=
+name=NSS Internal PKCS #11 Module
+parameters=configdir='./client' certPrefix='' keyPrefix='' secmod='secmod.db' flags= updatedir='' updateCertPrefix='' updateKeyPrefix='' updateid='' updateTokenDescription=''
+NSS=Flags=internal,critical trustOrder=75 cipherOrder=100 slotParams=(1={slotFlags=[RSA,DSA,DH,RC2,RC4,DES,RANDOM,SHA1,MD5,MD2,SSL,TLS,AES,Camellia,SEED,SHA256,SHA512] askpw=any timeout=30})
+++EOF++
+      echo "config=${policy}" >> "$OUTFILE"
+      echo "" >> "$OUTFILE"
+      echo "library=${ROOTCERTSFILE}" >> "$OUTFILE"
+      cat >> "$OUTFILE" << ++EOF++
+name=RootCerts
+NSS=trustOrder=100
+++EOF++
+
+      echo "******************************Testing $outdir with: "
+      cat "$OUTFILE"
+      echo "******************************"
+    }
+
+    ignore_blank_lines()
+    {
+      LC_ALL=C egrep -v '^[[:space:]]*(#|$)' "$1"
+    }
+
+    using_sql()
+    {
+        dbtype=$(nssdefaults --dbtype)
+        if [ ${dbtype##*: } = "sql" ]; then
+            return 0; # success case for bash
+        fi
+        return 1; # fail case for bash
+    }
+
+    # safe_kill terminates a background server process and waits for it to exit.
+    #
+    # Usage: safe_kill <pid> <job_pid>
+    #   pid     - the process ID to terminate (written by the server to its PID
+    #             file; used by taskkill on Windows, kill on Unix)
+    #   job_pid - the bash job PID ($!) used for wait on Windows, where the
+    #             shell may assign a different PID than the native process
+    #
+    # On Windows, bash's built-in kill triggers MSYS2 signal emulation, which
+    # can intermittently propagate SIGTERM back to the shell or return the
+    # killed process's exit code, causing spurious exit code 143 failures.
+    # taskkill terminates the process directly via the Windows API instead.
+    safe_kill() {
+        local pid=$1
+        local job_pid=$2
+
+        if [ "${OS_ARCH}" = "WINNT" ]; then
+            echo "taskkill /F /PID ${pid}"
+            MSYS2_ARG_CONV_EXCL="*" taskkill /F /PID ${pid} || true
+            wait ${job_pid} || true
+        else
+            echo "${KILL} -USR1 ${pid}"
+            ${KILL} -USR1 ${pid} || true
+            local ret=0; wait ${pid} || ret=$?
+            [ $ret -eq 0 ]
+        fi
+    }
+
+    # native_path converts a path to the native Windows format (with forward
+    # slashes) for tools like certutil that are native Windows binaries and
+    # cannot open MSYS/Cygwin Unix-style paths.
+    native_path() {
+        if [ "${OS_ARCH}" = "WINNT" ]; then
+            if [ $# -eq 0 ]; then
+                pwd -W
+            else
+                cygpath -m "$1"
+            fi
+        elif [ $# -eq 0 ]; then
+            pwd
+        else
+            echo "$1"
+        fi
+    }
 
 #directory name init
     SCRIPTNAME=init.sh
@@ -337,6 +462,9 @@ if [ -z "${INIT_SOURCED}" -o "${INIT_SOURCED}" != "TRUE" ]; then
     COMMON=${TEST_COMMON-$common}
     export COMMON
 
+    TSAN_SUPPRESSIONS_FILE=${COMMON}/tsan_suppressions.txt
+    export TSAN_OPTIONS="suppressions=${TSAN_SUPPRESSIONS_FILE}"
+
     DIST=${DIST-${MOZILLA_ROOT}/dist}
     TESTDIR=${TESTDIR-${MOZILLA_ROOT}/tests_results/security}
 
@@ -345,62 +473,68 @@ if [ -z "${INIT_SOURCED}" -o "${INIT_SOURCED}" != "TRUE" ]; then
         . ${DIST}/${OBJDIR}/platform.cfg
     fi
 
-    # only need make if we don't already have certain variables set
-    if [ -z "${OBJDIR}" -o -z "${OS_ARCH}" -o -z "${DLL_PREFIX}" -o -z "${DLL_SUFFIX}" ]; then
-        MAKE=gmake
-        $MAKE -v >/dev/null 2>&1 || MAKE=make
-        $MAKE -v >/dev/null 2>&1 || { echo "You are missing make."; exit 5; }
-        MAKE="$MAKE --no-print-directory"
+    # Both build.sh and "make nss_build_all" record the objdir in dist/latest.
+    if [ -z "${OBJDIR}" ]; then
+        if [ ! -f ${DIST}/latest ]; then
+            echo "${DIST}/latest not found; set OBJDIR to the dist subdirectory to test."
+            exit 5
+        fi
+        OBJDIR=$(cat ${DIST}/latest)
     fi
 
-    if [ "${OBJDIR}" = "" ]; then
-        if [ -f ${DIST}/latest ]; then
-            OBJDIR=$(cat ${DIST}/latest)
-        else
-            OBJDIR=`($MAKE -s -C $COMMON objdir_name)`
+    # These mirror coreconf (arch.mk and the per-OS .mk files). Test whether
+    # each is set at all rather than non-empty: DLL_PREFIX is legitimately
+    # empty on Windows, so a value the caller set has to win.
+    if [ -z "${OS_ARCH+set}" ]; then
+        OS_ARCH=`uname -s | sed -e "s|/|_|g"`
+        case "${OS_ARCH}" in
+            Windows_NT|CYGWIN_NT*|MSYS_NT-*|MINGW32_NT-*|MINGW64_NT-*)
+                OS_ARCH=WINNT ;;
+            GNU|GNU_kFreeBSD)
+                OS_ARCH=Linux ;;
+            UNIX_System_V)
+                OS_ARCH=NEC ;;
+        esac
+        if [ "${OS_TARGET}" = "Android" ]; then
+            OS_ARCH=Android
         fi
     fi
-    if [ "${OS_ARCH}" = "" ]; then
-        OS_ARCH=`(cd $COMMON; $MAKE os_arch)`
+    if [ -z "${DLL_PREFIX+set}" ]; then
+        if [ "${OS_ARCH}" = "WINNT" ]; then
+            DLL_PREFIX=
+        else
+            DLL_PREFIX=lib
+        fi
     fi
-    if [ "${DLL_PREFIX}" = "" ]; then
-        DLL_PREFIX=`(cd $COMMON; $MAKE dll_prefix)`
+    if [ -z "${DLL_SUFFIX+set}" ]; then
+        case "${OS_ARCH}" in
+            WINNT) DLL_SUFFIX=dll ;;
+            Darwin) DLL_SUFFIX=dylib ;;
+            OpenBSD) DLL_SUFFIX=so.1.0 ;;
+            HP-UX)
+                if [ "`uname -m`" = "ia64" ]; then
+                    DLL_SUFFIX=so
+                else
+                    DLL_SUFFIX=sl
+                fi
+                ;;
+            *) DLL_SUFFIX=so ;;
+        esac
     fi
-    if [ "${DLL_SUFFIX}" = "" ]; then
-        DLL_SUFFIX=`(cd $COMMON; $MAKE dll_suffix)`
-    fi
-    OS_NAME=`uname -s | sed -e "s/-[0-9]*\.[0-9]*//" | sed -e "s/-WOW64//"`
+    OS_NAME=`uname -s | sed -e "s/-[0-9.-]*//" | sed -e "s/-WOW64//"`
 
     BINDIR="${DIST}/${OBJDIR}/bin"
 
-    # Pathnames constructed from ${TESTDIR} are passed to NSS tools
-    # such as certutil, which don't understand Cygwin pathnames.
-    # So we need to convert ${TESTDIR} to a Windows pathname (with
-    # regular slashes).
-    if [ "${OS_ARCH}" = "WINNT" -a "$OS_NAME" = "CYGWIN_NT" ]; then
-        TESTDIR=`cygpath -m ${TESTDIR}`
-        QADIR=`cygpath -m ${QADIR}`
-    fi
-
-    # Same problem with MSYS/Mingw, except we need to start over with pwd -W
-    if [ "${OS_ARCH}" = "WINNT" -a "$OS_NAME" = "MINGW32_NT" ]; then
-                mingw_mozilla_root=`(cd ../../..; pwd -W)`
-                MINGW_MOZILLA_ROOT=${MINGW_MOZILLA_ROOT-$mingw_mozilla_root}
-                TESTDIR=${MINGW_TESTDIR-${MINGW_MOZILLA_ROOT}/tests_results/security}
-    fi
-
-    # Same problem with MSYS/Mingw, except we need to start over with pwd -W
-    if [ "${OS_ARCH}" = "WINNT" -a "$OS_NAME" = "MINGW32_NT" ]; then
-                mingw_mozilla_root=`(cd ../../..; pwd -W)`
-                MINGW_MOZILLA_ROOT=${MINGW_MOZILLA_ROOT-$mingw_mozilla_root}
-                TESTDIR=${MINGW_TESTDIR-${MINGW_MOZILLA_ROOT}/tests_results/security}
+    if [ "${OS_ARCH}" = "WINNT" ]; then
+        TESTDIR=$(native_path "${TESTDIR}")
+        QADIR=$(native_path "${QADIR}")
     fi
     echo testdir is $TESTDIR
 
 #in case of backward comp. tests the calling scripts set the
 #PATH and LD_LIBRARY_PATH and do not want them to be changed
     if [ -z "${DON_T_SET_PATHS}" -o "${DON_T_SET_PATHS}" != "TRUE" ] ; then
-        if [ "${OS_ARCH}" = "WINNT" -a "$OS_NAME"  != "CYGWIN_NT" -a "$OS_NAME" != "MINGW32_NT" ]; then
+        if [ "${OS_ARCH}" = "WINNT" -a "$OS_NAME"  != "CYGWIN_NT" -a "$OS_NAME" != "MINGW32_NT" -a "$OS_NAME" != "MSYS_NT" ]; then
             PATH=.\;${DIST}/${OBJDIR}/bin\;${DIST}/${OBJDIR}/lib\;$PATH
             PATH=`perl ../path_uniq -d ';' "$PATH"`
         elif [ "${OS_ARCH}" = "Android" ]; then
@@ -514,6 +648,10 @@ if [ -z "${INIT_SOURCED}" -o "${INIT_SOURCED}" != "TRUE" ]; then
         HOSTDIR=${TESTDIR}/${HOST}'.'$version
 
         mkdir -p ${HOSTDIR}
+
+        # Stable path to the most recent run, so that callers do not have to
+        # sort the numbered directories themselves.
+        ln -sfn ${HOST}'.'$version ${TESTDIR}/latest 2>/dev/null
     fi
 
 #result and log file and filename init,
@@ -744,9 +882,16 @@ if [ -z "${INIT_SOURCED}" -o "${INIT_SOURCED}" != "TRUE" ]; then
     fi
     #################################################
 
+    # Only scan for core files where we enable them; elsewhere detect_core()
+    # can never find anything. Override to force it either way.
     if [ "${OS_ARCH}" != "WINNT" -a "${OS_ARCH}" != "Android" ]; then
         ulimit -c unlimited
+        NSS_DETECT_CORE=${NSS_DETECT_CORE:-1}
+    else
+        NSS_DETECT_CORE=${NSS_DETECT_CORE:-0}
     fi
+    NSS_CORE_SCAN_INTERVAL=${NSS_CORE_SCAN_INTERVAL:-2}
+    _core_scanned_at=      # empty until the first scan, which is never skipped
 
     SCRIPTNAME=$0
     INIT_SOURCED=TRUE   #whatever one does - NEVER export this one please

@@ -127,6 +127,7 @@ Result SearchNames(const Input* subjectAltName, Input subject,
                    GeneralNameType referenceIDType,
                    Input referenceID,
                    FallBackToSearchWithinSubject fallBackToCommonName,
+                   HandleInvalidSubjectAlternativeNamesBy handleInvalidSANsBy,
                    /*out*/ MatchResult& match);
 Result SearchWithinRDN(Reader& rdn,
                        GeneralNameType referenceIDType,
@@ -171,6 +172,12 @@ enum class IDRole
   NameConstraint = 2,
 };
 
+enum class NameConstraintsSubtrees : uint8_t
+{
+  permittedSubtrees = der::CONSTRUCTED | der::CONTEXT_SPECIFIC | 0,
+  excludedSubtrees  = der::CONSTRUCTED | der::CONTEXT_SPECIFIC | 1
+};
+
 enum class AllowWildcards { No = 0, Yes = 1 };
 
 // DNSName constraints implicitly allow subdomain matching when there is no
@@ -183,16 +190,22 @@ enum class AllowDotlessSubdomainMatches { No = 0, Yes = 1 };
 bool IsValidDNSID(Input hostname, IDRole idRole,
                   AllowWildcards allowWildcards);
 
+// `subtreesType` is relevant only when `referenceDNSIDRole` is
+// `IDRole::NameConstraint`.
 Result MatchPresentedDNSIDWithReferenceDNSID(
          Input presentedDNSID,
          AllowWildcards allowWildcards,
          AllowDotlessSubdomainMatches allowDotlessSubdomainMatches,
          IDRole referenceDNSIDRole,
+         /*optional*/ const NameConstraintsSubtrees* subtreesType,
          Input referenceDNSID,
          /*out*/ bool& matches);
 
+// `subtreesType` is relevant only when `referenceDNSIDRole` is
+// `IDRole::NameConstraint`.
 Result MatchPresentedRFC822NameWithReferenceRFC822Name(
          Input presentedRFC822Name, IDRole referenceRFC822NameRole,
+         /*optional*/ const NameConstraintsSubtrees* subtreesType,
          Input referenceRFC822Name, /*out*/ bool& matches);
 
 } // namespace
@@ -211,7 +224,7 @@ MatchPresentedDNSIDWithReferenceDNSID(Input presentedDNSID,
   return MatchPresentedDNSIDWithReferenceDNSID(
            presentedDNSID, AllowWildcards::Yes,
            AllowDotlessSubdomainMatches::Yes, IDRole::ReferenceID,
-           referenceDNSID, matches);
+           nullptr, referenceDNSID, matches);
 }
 
 // Verify that the given end-entity cert, which is assumed to have been already
@@ -239,6 +252,8 @@ CheckCertHostname(Input endEntityCertDER, Input hostname,
   if (rv != Success) {
     return rv;
   }
+  HandleInvalidSubjectAlternativeNamesBy handleInvalidSANsBy =
+    nameMatchingPolicy.HandleInvalidSubjectAlternativeNames();
 
   const Input* subjectAltName(cert.GetSubjectAltName());
   Input subject(cert.GetSubject());
@@ -257,13 +272,16 @@ CheckCertHostname(Input endEntityCertDER, Input hostname,
   uint8_t ipv4[4];
   if (IsValidReferenceDNSID(hostname)) {
     rv = SearchNames(subjectAltName, subject, GeneralNameType::dNSName,
-                     hostname, fallBackToSearchWithinSubject, match);
+                     hostname, fallBackToSearchWithinSubject,
+                     handleInvalidSANsBy, match);
   } else if (ParseIPv6Address(hostname, ipv6)) {
     rv = SearchNames(subjectAltName, subject, GeneralNameType::iPAddress,
-                     Input(ipv6), FallBackToSearchWithinSubject::No, match);
+                     Input(ipv6), FallBackToSearchWithinSubject::No,
+                     HandleInvalidSubjectAlternativeNamesBy::Halting, match);
   } else if (ParseIPv4Address(hostname, ipv4)) {
     rv = SearchNames(subjectAltName, subject, GeneralNameType::iPAddress,
-                     Input(ipv4), fallBackToSearchWithinSubject, match);
+                     Input(ipv4), fallBackToSearchWithinSubject,
+                     HandleInvalidSubjectAlternativeNamesBy::Halting, match);
   } else {
     return Result::ERROR_BAD_CERT_DOMAIN;
   }
@@ -287,6 +305,13 @@ Result StrictNameMatchingPolicy::FallBackToCommonName(
     /*out*/ FallBackToSearchWithinSubject& fallBackToCommonName) {
   fallBackToCommonName = FallBackToSearchWithinSubject::No;
   return Success;
+}
+
+// A strict name matching policy for CheckCertHostname which halts with an
+// error upon encountering an invalid subject alternative name entry.
+HandleInvalidSubjectAlternativeNamesBy
+StrictNameMatchingPolicy::HandleInvalidSubjectAlternativeNames() {
+  return HandleInvalidSubjectAlternativeNamesBy::Halting;
 }
 
 Result
@@ -314,6 +339,7 @@ CheckNameConstraints(Input encodedNameConstraints,
     Result rv = SearchNames(child->GetSubjectAltName(), child->GetSubject(),
                             GeneralNameType::nameConstraints,
                             encodedNameConstraints, fallBackToCommonName,
+                            HandleInvalidSubjectAlternativeNamesBy::Halting,
                             match);
     if (rv != Success) {
       return rv;
@@ -353,6 +379,7 @@ SearchNames(/*optional*/ const Input* subjectAltName,
             GeneralNameType referenceIDType,
             Input referenceID,
             FallBackToSearchWithinSubject fallBackToCommonName,
+            HandleInvalidSubjectAlternativeNamesBy handleInvalidSANsBy,
             /*out*/ MatchResult& match)
 {
   Result rv;
@@ -399,6 +426,10 @@ SearchNames(/*optional*/ const Input* subjectAltName,
                                            referenceIDType, referenceID,
                                            match);
       if (rv != Success) {
+        if (!IsFatalError(rv) &&
+            handleInvalidSANsBy == HandleInvalidSubjectAlternativeNamesBy::Skipping) {
+          continue;
+        }
         return rv;
       }
       if (referenceIDType != GeneralNameType::nameConstraints &&
@@ -712,7 +743,7 @@ MatchPresentedIDWithReferenceID(GeneralNameType presentedIDType,
       rv = MatchPresentedDNSIDWithReferenceDNSID(
              presentedID, AllowWildcards::Yes,
              AllowDotlessSubdomainMatches::Yes, IDRole::ReferenceID,
-             referenceID, foundMatch);
+             nullptr, referenceID, foundMatch);
       break;
 
     case GeneralNameType::iPAddress:
@@ -722,7 +753,7 @@ MatchPresentedIDWithReferenceID(GeneralNameType presentedIDType,
 
     case GeneralNameType::rfc822Name:
       rv = MatchPresentedRFC822NameWithReferenceRFC822Name(
-             presentedID, IDRole::ReferenceID, referenceID, foundMatch);
+             presentedID, IDRole::ReferenceID, nullptr, referenceID, foundMatch);
       break;
 
     case GeneralNameType::directoryName:
@@ -748,20 +779,16 @@ MatchPresentedIDWithReferenceID(GeneralNameType presentedIDType,
   return Success;
 }
 
-enum class NameConstraintsSubtrees : uint8_t
-{
-  permittedSubtrees = der::CONSTRUCTED | der::CONTEXT_SPECIFIC | 0,
-  excludedSubtrees  = der::CONSTRUCTED | der::CONTEXT_SPECIFIC | 1
-};
-
 Result CheckPresentedIDConformsToNameConstraintsSubtrees(
          GeneralNameType presentedIDType,
          Input presentedID,
          Reader& nameConstraints,
          NameConstraintsSubtrees subtreesType);
+
 Result MatchPresentedIPAddressWithConstraint(Input presentedID,
                                              Input iPAddressConstraint,
                                              /*out*/ bool& foundMatch);
+
 Result MatchPresentedDirectoryNameWithConstraint(
          NameConstraintsSubtrees subtreesType, Input presentedID,
          Input directoryNameConstraint, /*out*/ bool& matches);
@@ -867,7 +894,7 @@ CheckPresentedIDConformsToNameConstraintsSubtrees(
           rv = MatchPresentedDNSIDWithReferenceDNSID(
                  presentedID, AllowWildcards::Yes,
                  AllowDotlessSubdomainMatches::Yes, IDRole::NameConstraint,
-                 base, matches);
+                 &subtreesType, base, matches);
           if (rv != Success) {
             return rv;
           }
@@ -892,7 +919,7 @@ CheckPresentedIDConformsToNameConstraintsSubtrees(
 
         case GeneralNameType::rfc822Name:
           rv = MatchPresentedRFC822NameWithReferenceRFC822Name(
-                 presentedID, IDRole::NameConstraint, base, matches);
+                 presentedID, IDRole::NameConstraint, &subtreesType, base, matches);
           if (rv != Success) {
             return rv;
           }
@@ -1075,6 +1102,7 @@ MatchPresentedDNSIDWithReferenceDNSID(
   AllowWildcards allowWildcards,
   AllowDotlessSubdomainMatches allowDotlessSubdomainMatches,
   IDRole referenceDNSIDRole,
+  /*optional*/ const NameConstraintsSubtrees* subtreesType,
   Input referenceDNSID,
   /*out*/ bool& matches)
 {
@@ -1165,18 +1193,28 @@ MatchPresentedDNSIDWithReferenceDNSID(
       return NotReached("Skipping '*' failed",
                         Result::FATAL_ERROR_LIBRARY_FAILURE);
     }
-    do {
-      // This will happen if reference is a single, relative label
-      if (reference.AtEnd()) {
-        matches = false;
-        return Success;
-      }
-      uint8_t referenceByte;
-      if (reference.Read(referenceByte) != Success) {
-        return NotReached("invalid reference ID",
-                          Result::FATAL_ERROR_INVALID_ARGS);
-      }
-    } while (!reference.Peek('.'));
+    // For the permittedSubtrees of a name constraint, wildcard presented
+    // DNSIDs of the form `*.example.com` only match if the name constraint is
+    // of the form `.example.com` or `example.com`. To put it another way, a
+    // permittedSubtrees of `foo.example.com` does not match a wildcard
+    // presented DNSID of `*.example.com`, because in that case, the
+    // certificate could be valid for `bar.example.com`, which does not match
+    // the name constraint.
+    if (referenceDNSIDRole != IDRole::NameConstraint ||
+        (subtreesType && *subtreesType != NameConstraintsSubtrees::permittedSubtrees)) {
+      do {
+        // This will happen if reference is a single, relative label
+        if (reference.AtEnd()) {
+          matches = false;
+          return Success;
+        }
+        uint8_t referenceByte;
+        if (reference.Read(referenceByte) != Success) {
+          return NotReached("invalid reference ID",
+                            Result::FATAL_ERROR_INVALID_ARGS);
+        }
+      } while (!reference.Peek('.'));
+    }
   }
 
   for (;;) {
@@ -1533,11 +1571,13 @@ IsValidRFC822Name(Input input)
   }
 }
 
+// `subtreesType` is relevant only when `referenceRFC822NameRole` is
+// `IDRole::NameConstraint`.
 Result
-MatchPresentedRFC822NameWithReferenceRFC822Name(Input presentedRFC822Name,
-                                                IDRole referenceRFC822NameRole,
-                                                Input referenceRFC822Name,
-                                                /*out*/ bool& matches)
+MatchPresentedRFC822NameWithReferenceRFC822Name(
+  Input presentedRFC822Name, IDRole referenceRFC822NameRole,
+  /*optional*/ const NameConstraintsSubtrees* subtreesType,
+  Input referenceRFC822Name, /*out*/ bool& matches)
 {
   if (!IsValidRFC822Name(presentedRFC822Name)) {
     return Result::ERROR_BAD_DER;
@@ -1580,6 +1620,7 @@ MatchPresentedRFC822NameWithReferenceRFC822Name(Input presentedRFC822Name,
       return MatchPresentedDNSIDWithReferenceDNSID(
                presentedDNSID, AllowWildcards::No,
                AllowDotlessSubdomainMatches::No, IDRole::NameConstraint,
+               subtreesType,
                referenceRFC822Name, matches);
     }
   }
@@ -1948,8 +1989,9 @@ IsValidDNSID(Input hostname, IDRole idRole, AllowWildcards allowWildcards)
     }
     switch (b) {
       case '-':
-        if (labelLength == 0) {
-          return false; // Labels must not start with a hyphen.
+        // Only reference ID labels can start with a hyphen.
+        if (labelLength == 0 && idRole != IDRole::ReferenceID) {
+          return false;
         }
         labelIsAllNumeric = false;
         labelEndsWithHyphen = true;
@@ -2009,8 +2051,9 @@ IsValidDNSID(Input hostname, IDRole idRole, AllowWildcards allowWildcards)
             (idRole != IDRole::NameConstraint || !isFirstByte)) {
           return false;
         }
-        if (labelEndsWithHyphen) {
-          return false; // Labels must not end with a hyphen.
+        // Only reference ID labels can end with a hyphen.
+        if (labelEndsWithHyphen && idRole != IDRole::ReferenceID) {
+          return false;
         }
         labelLength = 0;
         break;
@@ -2027,8 +2070,9 @@ IsValidDNSID(Input hostname, IDRole idRole, AllowWildcards allowWildcards)
     return false;
   }
 
-  if (labelEndsWithHyphen) {
-    return false; // Labels must not end with a hyphen.
+  // Only reference ID labels can end with a hyphen.
+  if (labelEndsWithHyphen && idRole != IDRole::ReferenceID) {
+    return false;
   }
 
   if (labelIsAllNumeric) {

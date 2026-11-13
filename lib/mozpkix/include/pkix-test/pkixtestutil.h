@@ -40,7 +40,7 @@ class ByteString : public std::string {
  public:
   ByteString() {}
   ByteString(size_t count, uint8_t value) : std::string(count, char(value)) {}
-  ByteString(const uint8_t* data)
+  explicit ByteString(const uint8_t* data)
       : std::string(reinterpret_cast<const char*>(data)) {}
   ByteString(const uint8_t* data, size_t length)
       : std::string(reinterpret_cast<const char*>(data), length) {}
@@ -59,9 +59,7 @@ class ByteString : public std::string {
   void append(const uint8_t* data, size_t length) {
     std::string::append(reinterpret_cast<const char*>(data), length);
   }
-  void push_back(uint8_t c) {
-    std::string::push_back(char(c));
-  }
+  void push_back(uint8_t c) { std::string::push_back(char(c)); }
 };
 
 inline bool ENCODING_FAILED(const ByteString& bs) { return bs.empty(); }
@@ -105,6 +103,8 @@ enum class TestDigestAlgorithmID {
   SHA256,
   SHA384,
   SHA512,
+  // For signature algorithms without a pre-hash step (i.e. pure ML-DSA).
+  NONE,
 };
 
 struct TestPublicKeyAlgorithm {
@@ -122,6 +122,7 @@ ByteString DSS_G();
 
 TestPublicKeyAlgorithm DSS();
 TestPublicKeyAlgorithm RSA_PKCS1();
+TestPublicKeyAlgorithm ML_DSA(MLDSAParameterSet parameterSet);
 
 struct TestSignatureAlgorithm {
   TestSignatureAlgorithm(const TestPublicKeyAlgorithm& publicKeyAlg,
@@ -138,6 +139,7 @@ TestSignatureAlgorithm md2WithRSAEncryption();
 TestSignatureAlgorithm md5WithRSAEncryption();
 TestSignatureAlgorithm sha1WithRSAEncryption();
 TestSignatureAlgorithm sha256WithRSAEncryption();
+TestSignatureAlgorithm mlDSA(MLDSAParameterSet parameterSet);
 
 // e.g. YMDHMS(2016, 12, 31, 1, 23, 45) => 2016-12-31:01:23:45 (GMT)
 mozilla::pkix::Time YMDHMS(uint16_t year, uint16_t month, uint16_t day,
@@ -302,6 +304,7 @@ class TestKeyPair {
 TestKeyPair* CloneReusedKeyPair();
 TestKeyPair* GenerateKeyPair();
 TestKeyPair* GenerateDSSKeyPair();
+TestKeyPair* GenerateMLDSAKeyPair(MLDSAParameterSet parameterSet);
 inline void DeleteTestKeyPair(TestKeyPair* keyPair) { delete keyPair; }
 typedef std::unique_ptr<TestKeyPair> ScopedTestKeyPair;
 
@@ -310,6 +313,8 @@ Result TestVerifyECDSASignedData(Input data, DigestAlgorithm digestAlgorithm,
 Result TestVerifyRSAPKCS1SignedData(Input data, DigestAlgorithm digestAlgorithm,
                                     Input signature,
                                     Input subjectPublicKeyInfo);
+Result TestVerifyMLDSASignedData(Input data, MLDSAParameterSet parameterSet,
+                                 Input signature, Input subjectPublicKeyInfo);
 Result TestDigestBuf(Input item, DigestAlgorithm digestAlg,
                      /*out*/ uint8_t* digestBuf, size_t digestBufLen);
 
@@ -411,6 +416,8 @@ class OCSPResponseContext final {
   OCSPResponseExtension* singleExtensions;
   // ResponseData extensions.
   OCSPResponseExtension* responseExtensions;
+  const ByteString* trailingResponseData;  // optional; trailing data to include
+                                           // at the end of the ResponseData.
   bool includeEmptyExtensions;  // If true, include the extension wrapper
                                 // regardless of if there are any actual
                                 // extensions.

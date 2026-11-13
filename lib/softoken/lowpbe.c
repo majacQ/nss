@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include <limits.h> /* for UINT_MAX */
+
 #include "plarena.h"
 
 #include "seccomon.h"
@@ -21,6 +23,15 @@
 #include "pkcs11i.h"
 
 SEC_ASN1_MKSUB(SECOID_AlgorithmIDTemplate)
+
+/* Upper bound on PBE iteration counts accepted from parsed algorithm
+ * parameters.  This prevents denial-of-service from crafted input
+ * (e.g. PKCS#12 files with extreme iteration counts). */
+#ifdef SOFTOKEN_FUZZ
+#define MAX_ITERATION_COUNT 600000
+#else
+#define MAX_ITERATION_COUNT 100000000
+#endif
 
 /* how much a crypto encrypt/decryption may expand a buffer */
 #define MAX_CRYPTO_EXPANSION 64
@@ -69,7 +80,7 @@ static const SEC_ASN1Template NSSPKCS5V2PBES2ParameterTemplate[] = {
 static const SEC_ASN1Template NSSPKCS5V2PBEParameterTemplate[] = {
     { SEC_ASN1_SEQUENCE, 0, NULL, sizeof(NSSPKCS5PBEParameter) },
     /* this is really a choice, but since we don't understand any other
-       * choice, just inline it. */
+     * choice, just inline it. */
     { SEC_ASN1_OCTET_STRING, offsetof(NSSPKCS5PBEParameter, salt) },
     { SEC_ASN1_INTEGER, offsetof(NSSPKCS5PBEParameter, iteration) },
     { SEC_ASN1_INTEGER, offsetof(NSSPKCS5PBEParameter, keyLength) },
@@ -107,6 +118,14 @@ nsspkcs5_PBKDF1(const SECHashObject *hashObj, SECItem *salt, SECItem *pwd,
     SECStatus rv = SECFailure;
 
     if ((salt == NULL) || (pwd == NULL) || (iter < 0)) {
+        return NULL;
+    }
+
+    /* salt->len + pwd->len is used below to size pre_hash and is also copied
+     * out in two pieces; reject inputs where the sum would wrap so we can't
+     * under-allocate and then overflow the buffer. */
+    if (salt->len >= UINT_MAX - pwd->len) {
+        PORT_SetError(SEC_ERROR_INVALID_ARGS);
         return NULL;
     }
 
@@ -321,8 +340,17 @@ nsspkcs5_PBKDF2_F(const SECHashObject *hashobj, SECItem *pwitem, SECItem *salt,
     unsigned int hLen = hashobj->length;
     SECStatus rv = SECFailure;
     unsigned char *last = NULL;
-    unsigned int lastLength = salt->len + 4;
+    unsigned int lastLength;
     unsigned int lastBufLength;
+
+    /* salt->len + 4 (the 4-byte block index is appended) must not wrap;
+     * otherwise lastBufLength would undersize the buffer that the
+     * PORT_Memcpy below fills with salt->len bytes. */
+    if (salt->len >= UINT_MAX - 4) {
+        PORT_SetError(SEC_ERROR_INVALID_ARGS);
+        goto loser;
+    }
+    lastLength = salt->len + 4;
 
     cx = HMAC_Create(hashobj, pwitem->data, pwitem->len, PR_FALSE);
     if (cx == NULL) {
@@ -408,7 +436,7 @@ loser:
     return result;
 }
 
-#define NSSPBE_ROUNDUP(x, y) ((((x) + ((y)-1)) / (y)) * (y))
+#define NSSPBE_ROUNDUP(x, y) ((((x) + ((y) - 1)) / (y)) * (y))
 #define NSSPBE_MIN(x, y) ((x) < (y) ? (x) : (y))
 /*
  * This is the extended PBE function defined by the final PKCS #12 spec.
@@ -455,8 +483,17 @@ nsspkcs5_PKCS12PBE(const SECHashObject *hashObject,
         goto loser;
     }
 
+    if (salt->len >= UINT_MAX - bufferLength ||
+        pwitem->len >= UINT_MAX - bufferLength) {
+        PORT_SetError(SEC_ERROR_INVALID_ARGS);
+        goto loser;
+    }
     SLen = NSSPBE_ROUNDUP(salt->len, bufferLength);
     PLen = NSSPBE_ROUNDUP(pwitem->len, bufferLength);
+    if (SLen > UINT_MAX - PLen) {
+        PORT_SetError(SEC_ERROR_INVALID_ARGS);
+        goto loser;
+    }
     I.len = SLen + PLen;
     I.data = (unsigned char *)PORT_ArenaZAlloc(arena, I.len);
     if (I.data == NULL) {
@@ -568,7 +605,7 @@ typedef struct KDFCacheItemStr KDFCacheItem;
  * hash, iterations and salt. */
 #define KDF2_CACHE_COUNT 150
 static struct {
-    PZLock *lock;
+    PRLock *lock;
     struct {
         KDFCacheItem common;
         int ivLen;
@@ -584,7 +621,7 @@ void
 sftk_PBELockInit(void)
 {
     if (!PBECache.lock) {
-        PBECache.lock = PZ_NewLock(nssIPBECacheLock);
+        PBECache.lock = PR_NewLock();
     }
 }
 
@@ -624,7 +661,7 @@ sftk_setPBECacheKDF2(const SECItem *hash,
                      const NSSPKCS5PBEParameter *pbe_param,
                      const SECItem *pwItem)
 {
-    PZ_Lock(PBECache.lock);
+    PR_Lock(PBECache.lock);
     KDFCacheItem *next = &PBECache.cacheKDF2.common[PBECache.cacheKDF2.next];
 
     sftk_clearPBECommonCacheItemsLocked(next);
@@ -635,7 +672,7 @@ sftk_setPBECacheKDF2(const SECItem *hash,
         PBECache.cacheKDF2.next = 0;
     }
 
-    PZ_Unlock(PBECache.lock);
+    PR_Unlock(PBECache.lock);
 }
 
 static void
@@ -644,7 +681,7 @@ sftk_setPBECacheKDF1(const SECItem *hash,
                      const SECItem *pwItem,
                      PRBool faulty3DES)
 {
-    PZ_Lock(PBECache.lock);
+    PR_Lock(PBECache.lock);
 
     sftk_clearPBECommonCacheItemsLocked(&PBECache.cacheKDF1.common);
 
@@ -653,7 +690,7 @@ sftk_setPBECacheKDF1(const SECItem *hash,
     PBECache.cacheKDF1.faulty3DES = faulty3DES;
     PBECache.cacheKDF1.ivLen = pbe_param->ivLen;
 
-    PZ_Unlock(PBECache.lock);
+    PR_Unlock(PBECache.lock);
 }
 
 static PRBool
@@ -678,7 +715,7 @@ sftk_getPBECacheKDF2(const NSSPKCS5PBEParameter *pbe_param,
     SECItem *result = NULL;
     int i;
 
-    PZ_Lock(PBECache.lock);
+    PR_Lock(PBECache.lock);
     for (i = 0; i < KDF2_CACHE_COUNT; i++) {
         const KDFCacheItem *cacheItem = &PBECache.cacheKDF2.common[i];
         if (sftk_comparePBECommonCacheItemLocked(cacheItem,
@@ -687,7 +724,7 @@ sftk_getPBECacheKDF2(const NSSPKCS5PBEParameter *pbe_param,
             break;
         }
     }
-    PZ_Unlock(PBECache.lock);
+    PR_Unlock(PBECache.lock);
 
     return result;
 }
@@ -700,13 +737,13 @@ sftk_getPBECacheKDF1(const NSSPKCS5PBEParameter *pbe_param,
     SECItem *result = NULL;
     const KDFCacheItem *cacheItem = &PBECache.cacheKDF1.common;
 
-    PZ_Lock(PBECache.lock);
+    PR_Lock(PBECache.lock);
     if (sftk_comparePBECommonCacheItemLocked(cacheItem, pbe_param, pwItem) &&
         PBECache.cacheKDF1.faulty3DES == faulty3DES &&
         PBECache.cacheKDF1.ivLen == pbe_param->ivLen) {
         result = SECITEM_DupItem(cacheItem->hash);
     }
-    PZ_Unlock(PBECache.lock);
+    PR_Unlock(PBECache.lock);
 
     return result;
 }
@@ -716,7 +753,7 @@ sftk_PBELockShutdown(void)
 {
     int i;
     if (PBECache.lock) {
-        PZ_DestroyLock(PBECache.lock);
+        PR_DestroyLock(PBECache.lock);
         PBECache.lock = 0;
     }
     sftk_clearPBECommonCacheItemsLocked(&PBECache.cacheKDF1.common);
@@ -738,6 +775,11 @@ nsspkcs5_ComputeKeyAndIV(NSSPKCS5PBEParameter *pbe_param, SECItem *pwitem,
     PRBool getIV = PR_FALSE;
 
     if ((pbe_param == NULL) || (pwitem == NULL)) {
+        return NULL;
+    }
+
+    if (pbe_param->iter > MAX_ITERATION_COUNT) {
+        PORT_SetError(SEC_ERROR_INVALID_ARGS);
         return NULL;
     }
 
@@ -803,13 +845,7 @@ nsspkcs5_ComputeKeyAndIV(NSSPKCS5PBEParameter *pbe_param, SECItem *pwitem,
         goto loser;
     }
 
-    if (pbe_param->is2KeyDES) {
-        PORT_Memcpy(key->data, hash->data, (key->len * 2) / 3);
-        PORT_Memcpy(&(key->data[(key->len * 2) / 3]), key->data,
-                    key->len / 3);
-    } else {
-        PORT_Memcpy(key->data, hash->data, key->len);
-    }
+    PORT_Memcpy(key->data, hash->data, key->len);
 
     SECITEM_ZfreeItem(hash, PR_TRUE);
     return key;
@@ -878,10 +914,15 @@ nsspkcs5_FillInParam(SECOidTag algorithm, HASH_HashType hashType,
         /* DES3 Algorithms */
         case SEC_OID_PKCS12_V2_PBE_WITH_SHA1_AND_2KEY_TRIPLE_DES_CBC:
             pbe_param->is2KeyDES = PR_TRUE;
-        /* fall through */
+            pbe_param->pbeType = NSSPKCS5_PKCS12_V2;
+            pbe_param->keyLen = 16;
+            pbe_param->encAlg = SEC_OID_DES_EDE3_CBC;
+            break;
         case SEC_OID_PKCS12_V2_PBE_WITH_SHA1_AND_3KEY_TRIPLE_DES_CBC:
             pbe_param->pbeType = NSSPKCS5_PKCS12_V2;
-        /* fall through */
+            pbe_param->keyLen = 24;
+            pbe_param->encAlg = SEC_OID_DES_EDE3_CBC;
+            break;
         case SEC_OID_PKCS12_PBE_WITH_SHA1_AND_TRIPLE_DES_CBC:
             pbe_param->keyLen = 24;
             pbe_param->encAlg = SEC_OID_DES_EDE3_CBC;
@@ -1153,7 +1194,12 @@ nsspkcs5_AlgidToParam(SECAlgorithmID *algid)
                 if (rv != SECSuccess) {
                     break;
                 }
+                PORT_SetError(0);
                 pbe_param->keyLen = DER_GetInteger(&pbe_param->keyLength);
+                if (PORT_GetError() != 0) {
+                    rv = SECFailure;
+                    break;
+                }
             }
             /* we we are encrypting, save any iv's */
             if (algorithm == SEC_OID_PKCS5_PBES2) {
@@ -1172,7 +1218,12 @@ nsspkcs5_AlgidToParam(SECAlgorithmID *algid)
 loser:
     PORT_Memset(&pbev2_param, 0, sizeof(pbev2_param));
     if (rv == SECSuccess) {
+        PORT_SetError(0);
         pbe_param->iter = DER_GetInteger(&pbe_param->iteration);
+        if (PORT_GetError() != 0) {
+            nsspkcs5_DestroyPBEParameter(pbe_param);
+            pbe_param = NULL;
+        }
     } else {
         nsspkcs5_DestroyPBEParameter(pbe_param);
         pbe_param = NULL;
@@ -1209,7 +1260,13 @@ sec_pkcs5_des(SECItem *key, SECItem *iv, SECItem *src, PRBool triple_des,
     DESContext *ctxt;
     unsigned int pad;
 
-    if ((src == NULL) || (key == NULL) || (iv == NULL)) {
+    /* freebl's DES_CreateContext has no IV/key length parameters and reads
+     * fixed-size buffers, so reject undersized SECItems here before they can
+     * cause an out-of-bounds read. */
+    if ((src == NULL) || (key == NULL) || (iv == NULL) ||
+        (key->data == NULL) ||
+        (key->len < (unsigned int)(triple_des ? 24 : DES_KEY_LENGTH)) ||
+        (iv->data == NULL) || (iv->len < DES_BLOCK_SIZE)) {
         PORT_SetError(SEC_ERROR_INVALID_ARGS);
         return NULL;
     }
@@ -1285,7 +1342,11 @@ sec_pkcs5_aes(SECItem *key, SECItem *iv, SECItem *src, PRBool triple_des,
     AESContext *ctxt;
     unsigned int pad;
 
-    if ((src == NULL) || (key == NULL) || (iv == NULL)) {
+    /* AES_CreateContext reads AES_BLOCK_SIZE bytes of IV with no length
+     * parameter; reject undersized SECItems to prevent OOB reads. */
+    if ((src == NULL) || (key == NULL) || (iv == NULL) ||
+        (key->data == NULL) || (iv->data == NULL) ||
+        (iv->len < AES_BLOCK_SIZE)) {
         PORT_SetError(SEC_ERROR_INVALID_ARGS);
         return NULL;
     }
@@ -1360,7 +1421,12 @@ sec_pkcs5_aes_key_wrap(SECItem *key, SECItem *iv, SECItem *src, PRBool triple_de
     AESKeyWrapContext *ctxt;
     unsigned int pad;
 
-    if ((src == NULL) || (key == NULL) || (iv == NULL)) {
+    /* AESKeyWrap_CreateContext reads AES_KEY_WRAP_BLOCK_SIZE bytes of IV when
+     * non-NULL; reject undersized SECItems to prevent OOB reads. A NULL
+     * iv->data is allowed and selects the default key-wrap IV. */
+    if ((src == NULL) || (key == NULL) || (iv == NULL) ||
+        (key->data == NULL) ||
+        (iv->data != NULL && iv->len < AES_KEY_WRAP_BLOCK_SIZE)) {
         PORT_SetError(SEC_ERROR_INVALID_ARGS);
         return NULL;
     }
@@ -1434,7 +1500,11 @@ sec_pkcs5_rc2(SECItem *key, SECItem *iv, SECItem *src, PRBool dummy,
     SECStatus rv = SECFailure;
     int pad;
 
-    if ((src == NULL) || (key == NULL) || (iv == NULL)) {
+    /* RC2_CreateContext reads 8 bytes of IV in CBC mode with no length
+     * parameter; reject undersized SECItems to prevent OOB reads. */
+    if ((src == NULL) || (key == NULL) || (iv == NULL) ||
+        (key->data == NULL) || (iv->data == NULL) ||
+        (iv->len < 8 /* RC2_BLOCK_SIZE */)) {
         PORT_SetError(SEC_ERROR_INVALID_ARGS);
         return NULL;
     }
@@ -1472,19 +1542,27 @@ sec_pkcs5_rc2(SECItem *key, SECItem *iv, SECItem *src, PRBool dummy,
 
                 /* assumes 8 byte blocks  -- remove padding */
                 if ((rv == SECSuccess) && (encrypt != PR_TRUE)) {
-                    pad = dest->data[dest->len - 1];
-                    if ((pad > 0) && (pad <= 8)) {
-                        if (dest->data[dest->len - pad] != pad) {
-                            PORT_SetError(SEC_ERROR_BAD_PASSWORD);
-                            rv = SECFailure;
-                        } else {
-                            dest->len -= pad;
-                        }
-                    } else {
+                    /* a padded plaintext holds at least one block; an empty
+                     * decryption result would make dest->len - 1 wrap. */
+                    if (dest->len < 8 /* RC2_BLOCK_SIZE */) {
                         PORT_SetError(SEC_ERROR_BAD_PASSWORD);
                         rv = SECFailure;
+                    } else {
+                        pad = dest->data[dest->len - 1];
+                        if ((pad > 0) && (pad <= 8)) {
+                            if (dest->data[dest->len - pad] != pad) {
+                                PORT_SetError(SEC_ERROR_BAD_PASSWORD);
+                                rv = SECFailure;
+                            } else {
+                                dest->len -= pad;
+                            }
+                        } else {
+                            PORT_SetError(SEC_ERROR_BAD_PASSWORD);
+                            rv = SECFailure;
+                        }
                     }
                 }
+                RC2_DestroyContext(ctxt, PR_TRUE);
             }
         }
     }
@@ -1574,6 +1652,19 @@ nsspkcs5_CipherData(NSSPKCS5PBEParameter *pbe_param, SECItem *pwitem,
     key = nsspkcs5_ComputeKeyAndIV(pbe_param, pwitem, &iv, PR_FALSE);
     if (key == NULL) {
         return NULL;
+    }
+
+    /* 2-key 3DES expands K1||K2 to K1||K2||K1; without this, the 16-byte
+     * key buffer is read as 24 bytes by DES_InitContext (OOB read). */
+    if (pbe_param->is2KeyDES && key->len == 16) {
+        SECItem *newKey = SECITEM_AllocItem(NULL, NULL, 24);
+        if (newKey == NULL) {
+            goto loser;
+        }
+        PORT_Memcpy(newKey->data, key->data, 16);
+        PORT_Memcpy(newKey->data + 16, key->data, 8);
+        SECITEM_ZfreeItem(key, PR_TRUE);
+        key = newKey;
     }
 
     switch (pbe_param->encAlg) {
@@ -1766,16 +1857,20 @@ sftk_fips_pbkdf_PowerUpSelfTests(void)
     unsigned char iteration_count = 5;
     unsigned char keyLen = 64;
     char *inKeyData = TEST_KEY;
-    static const unsigned char saltData[] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07 };
+    static const unsigned char saltData[] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f
+    };
+
     static const unsigned char pbkdf_known_answer[] = {
-        0x31, 0xf0, 0xe5, 0x39, 0x9f, 0x39, 0xb9, 0x29,
-        0x68, 0xac, 0xf2, 0xe9, 0x53, 0x9b, 0xb4, 0x9c,
-        0x28, 0x59, 0x8b, 0x5c, 0xd8, 0xd4, 0x02, 0x37,
-        0x18, 0x22, 0xc1, 0x92, 0xd0, 0xfa, 0x72, 0x90,
-        0x2c, 0x8d, 0x19, 0xd4, 0x56, 0xfb, 0x16, 0xfa,
-        0x8d, 0x5c, 0x06, 0x33, 0xd1, 0x5f, 0x17, 0xb1,
-        0x22, 0xd9, 0x9c, 0xaf, 0x5e, 0x3f, 0xf3, 0x66,
-        0xc6, 0x14, 0xfe, 0x83, 0xfa, 0x1a, 0x2a, 0xc5
+        0x73, 0x8c, 0xfa, 0x02, 0xe8, 0xdb, 0x43, 0xe4,
+        0x99, 0xc5, 0xfd, 0xd9, 0x4d, 0x8e, 0x3e, 0x7b,
+        0xc4, 0xda, 0x22, 0x1b, 0xe1, 0xae, 0x23, 0x7a,
+        0x21, 0x27, 0xbd, 0xcc, 0x78, 0xc4, 0xe6, 0xc5,
+        0x33, 0x38, 0x35, 0xe0, 0x68, 0x1a, 0x1e, 0x06,
+        0xad, 0xaf, 0x7f, 0xd7, 0x3f, 0x0e, 0xc0, 0x90,
+        0x17, 0x97, 0x73, 0x75, 0x7b, 0x88, 0x49, 0xd8,
+        0x6f, 0x78, 0x5a, 0xde, 0x50, 0x20, 0x55, 0x33
     };
 
     sftk_PBELockInit();

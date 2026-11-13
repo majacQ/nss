@@ -11,23 +11,22 @@
 #include "sechash.h"
 #include "stdio.h"
 
-#include "blapi.h"
-
 #include "gtest/gtest.h"
 #include "nss_scoped_ptrs.h"
 #include "util.h"
+#include "pk11_import.h"
 
 namespace nss_test {
 class Pkcs11KbkdfTest : public ::testing::Test {
  protected:
-  ScopedPK11SymKey ImportKey(CK_MECHANISM_TYPE mech, SECItem *key_item) {
+  ScopedPK11SymKey ImportKey(CK_MECHANISM_TYPE mech, SECItem* key_item) {
     ScopedPK11SlotInfo slot(PK11_GetInternalSlot());
     if (!slot) {
       ADD_FAILURE() << "Can't get slot";
       return nullptr;
     }
 
-    ScopedPK11SymKey result(PK11_ImportSymKey(
+    ScopedPK11SymKey result(nss_test::ImportSymKey(
         slot.get(), mech, PK11_OriginUnwrap, CKA_SIGN, key_item, nullptr));
 
     return result;
@@ -42,7 +41,7 @@ class Pkcs11KbkdfTest : public ::testing::Test {
     ScopedPK11SymKey p11Key = ImportKey(kdfParams->prfType, &keyItem);
 
     ASSERT_NE(kdfParams, nullptr);
-    SECItem paramsItem = {siBuffer, (unsigned char *)kdfParams,
+    SECItem paramsItem = {siBuffer, (unsigned char*)kdfParams,
                           sizeof(*kdfParams)};
 
     ScopedPK11SymKey result(PK11_Derive(p11Key.get(), kdfMech, &paramsItem,
@@ -50,10 +49,10 @@ class Pkcs11KbkdfTest : public ::testing::Test {
                                         expectedKeyLen));
     ASSERT_NE(result, nullptr);
 
-    ASSERT_EQ(PK11_ExtractKeyValue(result.get()), SECSuccess);
+    ASSERT_EQ(nss_test::ExtractKeyValue(result.get()), SECSuccess);
 
     /* We don't need to free this -- it is just a reference... */
-    SECItem *actualItem = PK11_GetKeyData(result.get());
+    SECItem* actualItem = nss_test::GetKeyData(result.get());
     ASSERT_NE(actualItem, nullptr);
 
     SECItem expectedItem = {siBuffer, expectedKey, expectedKeyLen};
@@ -71,10 +70,10 @@ class Pkcs11KbkdfTest : public ::testing::Test {
         PK11_SymKeyFromHandle(slot.get(), result.get(), PK11_OriginDerive,
                               CKM_SHA512_HMAC, *keyHandle, PR_FALSE, NULL));
 
-    ASSERT_EQ(PK11_ExtractKeyValue(additionalKey.get()), SECSuccess);
+    ASSERT_EQ(nss_test::ExtractKeyValue(additionalKey.get()), SECSuccess);
 
     /* We don't need to free this -- it is just a reference... */
-    actualItem = PK11_GetKeyData(additionalKey.get());
+    actualItem = nss_test::GetKeyData(additionalKey.get());
     ASSERT_NE(actualItem, nullptr);
 
     expectedItem = {siBuffer, expectedAdditional, expectedAdditionalLen};
@@ -130,6 +129,92 @@ TEST_F(Pkcs11KbkdfTest, TestAdditionalKey) {
          sizeof(inputKey) / sizeof(*inputKey), expectedKey,
          sizeof(expectedKey) / sizeof(*expectedKey), expectedAdditional,
          sizeof(expectedAdditional) / sizeof(*expectedAdditional));
+}
+
+TEST_F(Pkcs11KbkdfTest, TestPRFs) {
+  // Table 161 of PKCS#11 v3.0 / Table 192 of PKCS#11 v3.1.
+  CK_SP800_108_PRF_TYPE allowedPRFs[] = {
+      CKM_SHA_1_HMAC,
+      CKM_SHA224_HMAC,
+      CKM_SHA256_HMAC,
+      CKM_SHA384_HMAC,
+      CKM_SHA512_HMAC,
+      CKM_SHA3_224_HMAC,
+      CKM_SHA3_256_HMAC,
+      CKM_SHA3_384_HMAC,
+      CKM_SHA3_512_HMAC,
+      /* CKM_DES3_CMAC, */
+      CKM_AES_CMAC,
+  };
+  CK_SP800_108_PRF_TYPE disallowedPRFs[] = {
+      CKM_MD2_HMAC,
+      CKM_MD5_HMAC,
+      CKM_RIPEMD128_HMAC,
+      CKM_RIPEMD160_HMAC,
+  };
+
+  // Long enough for FIPS mode, which wants HMAC keys of half the hash size.
+  CK_BYTE inputKey[] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+                        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+                        0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f};
+
+  CK_SP800_108_COUNTER_FORMAT iterator = {CK_FALSE, 8};
+  CK_BYTE fixedData[] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                         0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+
+  CK_PRF_DATA_PARAM dataParams[] = {
+      {CK_SP800_108_BYTE_ARRAY, fixedData,
+       sizeof(fixedData) / sizeof(*fixedData)},
+      {CK_SP800_108_ITERATION_VARIABLE, &iterator, sizeof(iterator)}};
+
+  CK_KEY_TYPE ckGeneric = CKK_GENERIC_SECRET;
+  CK_OBJECT_CLASS ckClass = CKO_SECRET_KEY;
+  CK_ULONG derivedLength = 16;
+
+  CK_ATTRIBUTE derivedTemplate[] = {
+      {CKA_CLASS, &ckClass, sizeof(ckClass)},
+      {CKA_KEY_TYPE, &ckGeneric, sizeof(ckGeneric)},
+      {CKA_VALUE_LEN, &derivedLength, sizeof(derivedLength)}};
+
+  CK_OBJECT_HANDLE keyHandle;
+  CK_DERIVED_KEY derivedKey = {
+      derivedTemplate, sizeof(derivedTemplate) / sizeof(*derivedTemplate),
+      &keyHandle};
+
+  SECItem keyItem = {siBuffer, inputKey, sizeof(inputKey) / sizeof(*inputKey)};
+
+  for (CK_SP800_108_PRF_TYPE prfType : allowedPRFs) {
+    ScopedPK11SymKey p11Key = ImportKey(prfType, &keyItem);
+
+    CK_SP800_108_KDF_PARAMS kdfParams = {
+        prfType, sizeof(dataParams) / sizeof(*dataParams), dataParams, 1,
+        &derivedKey};
+    SECItem paramsItem = {siBuffer, (unsigned char*)&kdfParams,
+                          sizeof(kdfParams)};
+
+    ScopedPK11SymKey result(PK11_Derive(p11Key.get(), CKM_SP800_108_COUNTER_KDF,
+                                        &paramsItem, CKM_SHA512_HMAC, CKA_SIGN,
+                                        derivedLength));
+    ASSERT_NE(result, nullptr);
+
+    ASSERT_EQ(nss_test::ExtractKeyValue(result.get()), SECSuccess);
+  }
+
+  for (CK_SP800_108_PRF_TYPE prfType : disallowedPRFs) {
+    ScopedPK11SymKey p11Key = ImportKey(prfType, &keyItem);
+
+    CK_SP800_108_KDF_PARAMS kdfParams = {
+        prfType, sizeof(dataParams) / sizeof(*dataParams), dataParams, 1,
+        &derivedKey};
+    SECItem paramsItem = {siBuffer, (unsigned char*)&kdfParams,
+                          sizeof(kdfParams)};
+
+    ScopedPK11SymKey result(PK11_Derive(p11Key.get(), CKM_SP800_108_COUNTER_KDF,
+                                        &paramsItem, CKM_SHA512_HMAC, CKA_SIGN,
+                                        derivedLength));
+    ASSERT_EQ(result, nullptr);
+  }
 }
 
 // Close the namespace

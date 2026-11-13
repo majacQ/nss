@@ -14,23 +14,23 @@
 #include <vector>
 #include "secoidt.h"
 #include "pkcs11t.h"
+#include "kyber.h"
 
 typedef struct AesCbcTestVectorStr {
-  uint32_t id;
-  std::string key;
-  std::string msg;
-  std::string iv;
-  std::string ciphertext;
+  uint64_t id;
+  std::vector<uint8_t> key;
+  std::vector<uint8_t> msg;
+  std::vector<uint8_t> iv;
+  std::vector<uint8_t> ciphertext;
   bool valid;
 } AesCbcTestVector;
 
 typedef struct AesCmacTestVectorStr {
-  uint32_t id;
-  std::string comment;
-  std::string key;
-  std::string msg;
-  std::string tag;
-  bool invalid;
+  uint64_t id;
+  std::vector<uint8_t> key;
+  std::vector<uint8_t> msg;
+  std::vector<uint8_t> tag;
+  bool valid;
 } AesCmacTestVector;
 typedef AesCmacTestVector HmacTestVector;
 
@@ -58,6 +58,33 @@ typedef struct ChaChaTestVectorStr {
   bool invalid_iv;
 } ChaChaTestVector;
 
+typedef struct MlKemKeyGenTestVectorStr {
+  uint32_t id;
+  KyberParams params;
+  std::vector<uint8_t> seed;
+  std::vector<uint8_t> publicKeyDigest;
+  std::vector<uint8_t> privateKeyDigest;
+} MlKemKeyGenTestVector;
+
+typedef struct MlKemEncapTestVectorStr {
+  uint32_t id;
+  KyberParams params;
+  std::vector<uint8_t> entropy;
+  std::vector<uint8_t> publicKey;
+  std::vector<uint8_t> cipherTextDigest;
+  std::vector<uint8_t> secret;
+  bool expectedResult;
+} MlKemEncapTestVector;
+
+typedef struct MlKemDecapTestVectorStr {
+  uint32_t id;
+  KyberParams params;
+  std::vector<uint8_t> privateKey;
+  std::vector<uint8_t> cipherText;
+  std::vector<uint8_t> secret;
+  bool expectedResult;
+} MlKemDecapTestVector;
+
 typedef struct EcdsaTestVectorStr {
   SECOidTag hash_oid;
   uint32_t id;
@@ -69,6 +96,14 @@ typedef struct EcdsaTestVectorStr {
 
 typedef EcdsaTestVector DsaTestVector;
 
+typedef struct EddsaTestVectorStr {
+  uint32_t id;
+  std::vector<uint8_t> sig;
+  std::vector<uint8_t> public_key;
+  std::vector<uint8_t> msg;
+  bool valid;
+} EddsaTestVector;
+
 typedef struct EcdhTestVectorStr {
   uint64_t id;
   std::vector<uint8_t> private_key;
@@ -79,23 +114,23 @@ typedef struct EcdhTestVectorStr {
 } EcdhTestVector;
 
 typedef struct HkdfTestVectorStr {
-  uint32_t id;
-  std::string ikm;
-  std::string salt;
-  std::string info;
-  std::string okm;
+  uint64_t id;
+  std::vector<uint8_t> ikm;
+  std::vector<uint8_t> salt;
+  std::vector<uint8_t> info;
+  std::vector<uint8_t> okm;
   uint32_t size;
   bool valid;
 } HkdfTestVector;
 
 enum class IkeTestType {
-  ikeGxy,         /* CKM_NSS_IKE_PRF_DERIVE case 1 */
-  ikeV1Psk,       /* CKM_NSS_IKE_PRF_DERIVE case 2 */
-  ikeV2Rekey,     /* CKM_NSS_IKE_PRF_DERIVE case 3 */
-  ikeV1,          /* CKM_NSS_IKE1_PRF_DERIVE */
-  ikeV1AppB,      /* CKM_NSS_IKE1_PRF_APP_B_DERIVE base mode */
-  ikeV1AppBQuick, /* CKM_NSS_IKE1_PRF_APP_B_DERIVE quick mode */
-  ikePlus         /* CKM_NSS_IKE_PRF_DERIVE */
+  ikeGxy,         /* CKM_IKE_PRF_DERIVE case 1 */
+  ikeV1Psk,       /* CKM_IKE_PRF_DERIVE case 2 */
+  ikeV2Rekey,     /* CKM_IKE_PRF_DERIVE case 3 */
+  ikeV1,          /* CKM_IKE1_PRF_DERIVE */
+  ikeV1AppB,      /* CKM_IKE1_PRF_EXTENDED_DERIVE base mode */
+  ikeV1AppBQuick, /* CKM_IKE1_PRF_EXTENDED_DERIVE quick mode */
+  ikePlus         /* CKM_IKE2_PRF_PLUS_DERIVE */
 };
 
 typedef struct IkeTestVectorStr {

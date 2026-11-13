@@ -254,35 +254,6 @@ SEC_PKCS12AddPasswordIntegrity(SEC_PKCS12ExportContext *p12ctxt,
     return SECSuccess;
 }
 
-/* SEC_PKCS12AddPublicKeyIntegrity
- *      Add public key integrity to the exported data.  If an integrity method
- *      has already been set, then return an error.  The certificate must be
- *      allowed to be used as a signing cert.
- *
- *      p12ctxt - the export context
- *      cert - signer certificate
- *      certDb - the certificate database
- *      algorithm - signing algorithm
- *      keySize - size of the signing key (?)
- */
-SECStatus
-SEC_PKCS12AddPublicKeyIntegrity(SEC_PKCS12ExportContext *p12ctxt,
-                                CERTCertificate *cert, CERTCertDBHandle *certDb,
-                                SECOidTag algorithm, int keySize)
-{
-    if (!p12ctxt) {
-        return SECFailure;
-    }
-
-    p12ctxt->integrityInfo.pubkeyInfo.cert = cert;
-    p12ctxt->integrityInfo.pubkeyInfo.certDb = certDb;
-    p12ctxt->integrityInfo.pubkeyInfo.algorithm = algorithm;
-    p12ctxt->integrityInfo.pubkeyInfo.keySize = keySize;
-    p12ctxt->integrityEnabled = PR_TRUE;
-
-    return SECSuccess;
-}
-
 /*
  * Adding safes - encrypted (password/public key) or unencrypted
  *      Each of the safe creation routines return an opaque pointer which
@@ -373,8 +344,7 @@ SEC_PKCS12CreatePasswordPrivSafe(SEC_PKCS12ExportContext *p12ctxt,
                                                       sizeof(SEC_PKCS12SafeInfo));
     if (!safeInfo) {
         PORT_SetError(SEC_ERROR_NO_MEMORY);
-        PORT_ArenaRelease(p12ctxt->arena, mark);
-        return NULL;
+        goto loser;
     }
 
     safeInfo->itemCount = 0;
@@ -386,8 +356,19 @@ SEC_PKCS12CreatePasswordPrivSafe(SEC_PKCS12ExportContext *p12ctxt,
          * hash algorithm to set our password PRF. If we haven't set it, just
          * let the low level code pick it */
         if (p12ctxt->integrityEnabled && p12ctxt->pwdIntegrity) {
-            prfAlg = HASH_GetHMACOidTagByHashOidTag(
-                p12ctxt->integrityInfo.pwdInfo.algorithm);
+            SECOidTag integrityAlg = p12ctxt->integrityInfo.pwdInfo.algorithm;
+            prfAlg = integrityAlg;
+            /* verify that integrityAlg is an HMAC */
+            if (HASH_GetHashOidTagByHMACOidTag(integrityAlg) == SEC_OID_UNKNOWN) {
+                /* it's not, find the hmac */
+                prfAlg = HASH_GetHMACOidTagByHashOidTag(integrityAlg);
+                /* if prfAlg is SEC_OID_UNKNOWN at this point we'll
+                 * default to SEC_OID_HMAC_SHA1 in the low level pbe code. */
+            }
+        }
+        if (!SEC_PKCS12CipherAllowed(privAlg, prfAlg)) {
+            PORT_SetError(SEC_ERROR_BAD_EXPORT_ALGORITHM);
+            goto loser;
         }
         safeInfo->cinfo = SEC_PKCS7CreateEncryptedDataWithPBEV2(SEC_OID_PKCS5_PBES2,
                                                                 privAlg,
@@ -396,6 +377,10 @@ SEC_PKCS12CreatePasswordPrivSafe(SEC_PKCS12ExportContext *p12ctxt,
                                                                 p12ctxt->pwfn,
                                                                 p12ctxt->pwfnarg);
     } else {
+        if (!SEC_PKCS12CipherAllowed(privAlg, SEC_OID_UNKNOWN)) {
+            PORT_SetError(SEC_ERROR_BAD_EXPORT_ALGORITHM);
+            goto loser;
+        }
         safeInfo->cinfo = SEC_PKCS7CreateEncryptedData(privAlg, 0, p12ctxt->pwfn,
                                                        p12ctxt->pwfnarg);
     }
@@ -451,7 +436,7 @@ loser:
     if (slot) {
         PK11_FreeSlot(slot);
     }
-    if (safeInfo->cinfo) {
+    if (safeInfo && safeInfo->cinfo) {
         SEC_PKCS7DestroyContentInfo(safeInfo->cinfo);
     }
 
@@ -507,84 +492,6 @@ SEC_PKCS12CreateUnencryptedSafe(SEC_PKCS12ExportContext *p12ctxt)
 loser:
     if (safeInfo->cinfo) {
         SEC_PKCS7DestroyContentInfo(safeInfo->cinfo);
-    }
-
-    PORT_ArenaRelease(p12ctxt->arena, mark);
-    return NULL;
-}
-
-/* SEC_PKCS12CreatePubKeyEncryptedSafe
- *      Creates a safe which is protected by public key encryption.
- *
- *      p12ctxt - the export context
- *      certDb - the certificate database
- *      signer - the signer's certificate
- *      recipients - the list of recipient certificates.
- *      algorithm - the encryption algorithm to use
- *      keysize - the algorithms key size (?)
- */
-SEC_PKCS12SafeInfo *
-SEC_PKCS12CreatePubKeyEncryptedSafe(SEC_PKCS12ExportContext *p12ctxt,
-                                    CERTCertDBHandle *certDb,
-                                    CERTCertificate *signer,
-                                    CERTCertificate **recipients,
-                                    SECOidTag algorithm, int keysize)
-{
-    SEC_PKCS12SafeInfo *safeInfo = NULL;
-    void *mark = NULL;
-
-    if (!p12ctxt || !signer || !recipients || !(*recipients)) {
-        return NULL;
-    }
-
-    /* allocate the safeInfo */
-    mark = PORT_ArenaMark(p12ctxt->arena);
-    safeInfo = (SEC_PKCS12SafeInfo *)PORT_ArenaZAlloc(p12ctxt->arena,
-                                                      sizeof(SEC_PKCS12SafeInfo));
-    if (!safeInfo) {
-        PORT_ArenaRelease(p12ctxt->arena, mark);
-        PORT_SetError(SEC_ERROR_NO_MEMORY);
-        return NULL;
-    }
-
-    safeInfo->itemCount = 0;
-    safeInfo->arena = p12ctxt->arena;
-
-    /* create the enveloped content info using certUsageEmailSigner currently.
-     * XXX We need to eventually use something other than certUsageEmailSigner
-     */
-    safeInfo->cinfo = SEC_PKCS7CreateEnvelopedData(signer, certUsageEmailSigner,
-                                                   certDb, algorithm, keysize,
-                                                   p12ctxt->pwfn, p12ctxt->pwfnarg);
-    if (!safeInfo->cinfo) {
-        PORT_SetError(SEC_ERROR_NO_MEMORY);
-        goto loser;
-    }
-
-    /* add recipients */
-    if (recipients) {
-        unsigned int i = 0;
-        while (recipients[i] != NULL) {
-            SECStatus rv = SEC_PKCS7AddRecipient(safeInfo->cinfo, recipients[i],
-                                                 certUsageEmailRecipient, certDb);
-            if (rv != SECSuccess) {
-                goto loser;
-            }
-            i++;
-        }
-    }
-
-    if (sec_pkcs12_append_safe_info(p12ctxt, safeInfo) != SECSuccess) {
-        goto loser;
-    }
-
-    PORT_ArenaUnmark(p12ctxt->arena, mark);
-    return safeInfo;
-
-loser:
-    if (safeInfo->cinfo) {
-        SEC_PKCS7DestroyContentInfo(safeInfo->cinfo);
-        safeInfo->cinfo = NULL;
     }
 
     PORT_ArenaRelease(p12ctxt->arena, mark);
@@ -820,50 +727,6 @@ sec_PKCS12NewCertBag(PLArenaPool *arena, SECOidTag certType)
 
     PORT_ArenaUnmark(arena, mark);
     return certBag;
-
-loser:
-    PORT_ArenaRelease(arena, mark);
-    return NULL;
-}
-
-/* Creates a new CRL bag and returns a pointer to it.  If an error
- * occurs NULL is returned.
- */
-sec_PKCS12CRLBag *
-sec_PKCS12NewCRLBag(PLArenaPool *arena, SECOidTag crlType)
-{
-    sec_PKCS12CRLBag *crlBag = NULL;
-    SECOidData *bagType = NULL;
-    SECStatus rv;
-    void *mark = NULL;
-
-    if (!arena) {
-        return NULL;
-    }
-
-    mark = PORT_ArenaMark(arena);
-    crlBag = (sec_PKCS12CRLBag *)PORT_ArenaZAlloc(arena,
-                                                  sizeof(sec_PKCS12CRLBag));
-    if (!crlBag) {
-        PORT_ArenaRelease(arena, mark);
-        PORT_SetError(SEC_ERROR_NO_MEMORY);
-        return NULL;
-    }
-
-    bagType = SECOID_FindOIDByTag(crlType);
-    if (!bagType) {
-        PORT_SetError(SEC_ERROR_NO_MEMORY);
-        goto loser;
-    }
-
-    rv = SECITEM_CopyItem(arena, &crlBag->bagID, &bagType->oid);
-    if (rv != SECSuccess) {
-        PORT_SetError(SEC_ERROR_NO_MEMORY);
-        goto loser;
-    }
-
-    PORT_ArenaUnmark(arena, mark);
-    return crlBag;
 
 loser:
     PORT_ArenaRelease(arena, mark);
@@ -1233,8 +1096,20 @@ SEC_PKCS12AddKeyForCert(SEC_PKCS12ExportContext *p12ctxt, SEC_PKCS12SafeInfo *sa
          * hash algorithm to set our password PRF. If we haven't set it, just
          * let the low level code pick it */
         if (p12ctxt->integrityEnabled && p12ctxt->pwdIntegrity) {
-            prfAlg = HASH_GetHMACOidTagByHashOidTag(
-                p12ctxt->integrityInfo.pwdInfo.algorithm);
+            SECOidTag integrityAlg = p12ctxt->integrityInfo.pwdInfo.algorithm;
+            prfAlg = integrityAlg;
+            /* verify that integrityAlg is an HMAC */
+            if (HASH_GetHashOidTagByHMACOidTag(integrityAlg) == SEC_OID_UNKNOWN) {
+                /* it's not, find the hmac */
+                prfAlg = HASH_GetHMACOidTagByHashOidTag(integrityAlg);
+                /* if prfAlg is SEC_OID_UNKNOWN at this point we'll
+                 * default to SEC_OID_HMAC_SHA1 in the low level pbe code. */
+            }
+        }
+
+        if (!SEC_PKCS12CipherAllowed(algorithm, prfAlg)) {
+            PORT_SetError(SEC_ERROR_BAD_EXPORT_ALGORITHM);
+            goto loser;
         }
 
         /* we want to make sure to take the key out of the key slot */
@@ -1407,65 +1282,6 @@ SEC_PKCS12AddCertAndKey(SEC_PKCS12ExportContext *p12ctxt,
                                           algorithm, PR_TRUE);
 }
 
-/* SEC_PKCS12CreateNestedSafeContents
- *      Allows nesting of safe contents to be implemented.  No limit imposed on
- *      depth.
- *
- *      p12ctxt - the export context
- *      baseSafe - the base safeInfo
- *      nestedDest - a parent safeContents (?)
- */
-void *
-SEC_PKCS12CreateNestedSafeContents(SEC_PKCS12ExportContext *p12ctxt,
-                                   void *baseSafe, void *nestedDest)
-{
-    sec_PKCS12SafeContents *newSafe;
-    sec_PKCS12SafeBag *safeContentsBag;
-    void *mark;
-    SECStatus rv;
-
-    if (!p12ctxt || !baseSafe) {
-        return NULL;
-    }
-
-    mark = PORT_ArenaMark(p12ctxt->arena);
-
-    newSafe = sec_PKCS12CreateSafeContents(p12ctxt->arena);
-    if (!newSafe) {
-        PORT_ArenaRelease(p12ctxt->arena, mark);
-        PORT_SetError(SEC_ERROR_NO_MEMORY);
-        return NULL;
-    }
-
-    /* create the safeContents safeBag */
-    safeContentsBag = sec_PKCS12CreateSafeBag(p12ctxt,
-                                              SEC_OID_PKCS12_V1_SAFE_CONTENTS_BAG_ID,
-                                              newSafe);
-    if (!safeContentsBag) {
-        goto loser;
-    }
-
-    /* append the safeContents to the appropriate area */
-    if (nestedDest) {
-        rv = sec_pkcs12_append_bag_to_safe_contents(p12ctxt->arena,
-                                                    (sec_PKCS12SafeContents *)nestedDest,
-                                                    safeContentsBag);
-    } else {
-        rv = sec_pkcs12_append_bag(p12ctxt, (SEC_PKCS12SafeInfo *)baseSafe,
-                                   safeContentsBag);
-    }
-    if (rv != SECSuccess) {
-        goto loser;
-    }
-
-    PORT_ArenaUnmark(p12ctxt->arena, mark);
-    return newSafe;
-
-loser:
-    PORT_ArenaRelease(p12ctxt->arena, mark);
-    return NULL;
-}
-
 /*********************************
  * Encoding routines
  *********************************/
@@ -1512,7 +1328,7 @@ sec_pkcs12_encoder_start_context(SEC_PKCS12ExportContext *p12exp)
     SECItem ignore = { 0 };
     void *mark;
     SECItem *salt = NULL;
-    SECItem *params = NULL;
+    SECItem pwd = { siBuffer, NULL, 0 };
 
     if (!p12exp || !p12exp->safeInfos) {
         return NULL;
@@ -1577,10 +1393,11 @@ sec_pkcs12_encoder_start_context(SEC_PKCS12ExportContext *p12exp)
 
         /* init password pased integrity mode */
         if (p12exp->integrityEnabled) {
-            SECItem pwd = { siBuffer, NULL, 0 };
             PK11SymKey *symKey;
-            CK_MECHANISM_TYPE integrityMechType;
             CK_MECHANISM_TYPE hmacMechType;
+            SECOidTag hmacAlgTag;
+            SECOidTag hashAlgTag;
+
             salt = sec_pkcs12_generate_salt();
 
             /* zero out macData and set values */
@@ -1605,36 +1422,67 @@ sec_pkcs12_encoder_start_context(SEC_PKCS12ExportContext *p12exp)
                                                     PR_TRUE, PR_TRUE)) {
                 goto loser;
             }
-            /*
-             * This code only works with PKCS #12 Mac using PKCS #5 v1
-             * PBA keygens. PKCS #5 v2 support will require a change to
-             * the PKCS #12 spec.
-             */
-            params = PK11_CreatePBEParams(salt, &pwd,
-                                          NSS_PBE_DEFAULT_ITERATION_COUNT);
-            SECITEM_ZfreeItem(salt, PR_TRUE);
-            salt = NULL;
-            SECITEM_ZfreeItem(&pwd, PR_FALSE);
 
-            /* get the PBA Mechanism to generate the key */
-            integrityMechType = sec_pkcs12_algtag_to_keygen_mech(
-                p12exp->integrityInfo.pwdInfo.algorithm);
-            if (integrityMechType == CKM_INVALID_MECHANISM) {
+            /* create the digest info */
+            hmacAlgTag = p12exp->integrityInfo.pwdInfo.algorithm;
+            hashAlgTag = HASH_GetHashOidTagByHMACOidTag(hmacAlgTag);
+            if (hashAlgTag != SEC_OID_UNKNOWN) {
+                /* if the application asks for hmac explicitly, then use
+                 * pkcs5v2 mac1 encoding */
+                SECAlgorithmID *algID;
+                int keyLength;
+
+                keyLength = HASH_ResultLenByOidTag(hashAlgTag);
+                if (keyLength == 0) {
+                    PORT_SetError(SEC_ERROR_INVALID_ALGORITHM);
+                    return NULL;
+                }
+                /* create PB_MAC1 params */
+                algID = PK11_CreatePBEV2AlgorithmID(SEC_OID_PKCS5_PBMAC1,
+                                                    hmacAlgTag,
+                                                    hmacAlgTag, keyLength,
+                                                    NSS_PBE_DEFAULT_ITERATION_COUNT,
+                                                    &p12enc->mac.macSalt);
+                if (algID == NULL) {
+                    goto loser;
+                }
+                rv = SECOID_CopyAlgorithmID(p12enc->arena,
+                                            &p12enc->mac.safeMac.digestAlgorithm,
+                                            algID);
+                SECOID_DestroyAlgorithmID(algID, PR_TRUE);
+                if (rv != SECSuccess) {
+                    PORT_SetError(SEC_ERROR_NO_MEMORY);
+                    goto loser;
+                }
+            } else if (HASH_GetHashTypeByOidTag(hmacAlgTag) != HASH_AlgNULL) {
+                /* encode the algid now for sec_pkcs12_integrity_key to use */
+                /* this must be a valid hash function, SECOID_SetAlgorithmID
+                 * knows to encode the hash algid with an explicit
+                 * null parameter */
+                rv = SECOID_SetAlgorithmID(p12enc->arena,
+                                           &p12enc->mac.safeMac.digestAlgorithm,
+                                           hmacAlgTag, NULL);
+                if (rv != SECSuccess) {
+                    goto loser;
+                }
+            } else {
+                PORT_SetError(SEC_ERROR_INVALID_ALGORITHM);
                 goto loser;
             }
 
-            /* generate the key */
-            symKey = PK11_KeyGen(NULL, integrityMechType, params, 20, NULL);
-            PK11_DestroyPBEParams(params);
+            /* generate HMAC key */
+            SECITEM_ZfreeItem(salt, PR_TRUE);
+            salt = NULL;
+            symKey = sec_pkcs12_integrity_key(p12exp->slot, &p12enc->mac,
+                                              &pwd, &hmacMechType, PR_FALSE,
+                                              p12exp->wincx);
+            SECITEM_ZfreeItem(&pwd, PR_FALSE);
+
             if (!symKey) {
                 goto loser;
             }
 
             /* initialize HMAC */
-            /* Get the HMAC mechanism from the hash OID */
-            hmacMechType = sec_pkcs12_algtag_to_mech(
-                p12exp->integrityInfo.pwdInfo.algorithm);
-
             p12enc->hmacCx = PK11_CreateContextBySymKey(hmacMechType,
                                                         CKA_SIGN, symKey, &ignore);
 
@@ -1659,13 +1507,14 @@ sec_pkcs12_encoder_start_context(SEC_PKCS12ExportContext *p12exp)
 
 loser:
     sec_pkcs12_encoder_destroy_context(p12enc);
-    if (p12exp->arena != NULL)
+    if (p12exp->arena != NULL) {
         PORT_ArenaRelease(p12exp->arena, mark);
+    }
     if (salt) {
         SECITEM_ZfreeItem(salt, PR_TRUE);
     }
-    if (params) {
-        PK11_DestroyPBEParams(params);
+    if (pwd.data) {
+        SECITEM_ZfreeItem(&pwd, PR_FALSE);
     }
 
     return NULL;
@@ -1674,7 +1523,7 @@ loser:
 /* The outermost ASN.1 encoder calls this function for output.
 ** This function calls back to the library caller's output routine,
 ** which typically writes to a PKCS12 file.
- */
+*/
 static void
 sec_P12A1OutputCB_Outer(void *arg, const char *buf, unsigned long len,
                         int depth, SEC_ASN1EncodingPart data_kind)
@@ -1688,7 +1537,7 @@ sec_P12A1OutputCB_Outer(void *arg, const char *buf, unsigned long len,
 /* The "middle" and "inner" ASN.1 encoders call this function to output.
 ** This function does HMACing, if appropriate, and then buffers the data.
 ** The buffered data is eventually passed down to the underlying PKCS7 encoder.
- */
+*/
 static void
 sec_P12A1OutputCB_HmacP7Update(void *arg, const char *buf,
                                unsigned long len,
@@ -1828,6 +1677,9 @@ sec_pkcs12_encoder_asafe_process(sec_PKCS12EncoderContext *p12ecx)
         /* finish up safe content info */
         rv = SEC_PKCS7EncoderFinish(innerP7ecx, p12ecx->p12exp->pwfn,
                                     p12ecx->p12exp->pwfnarg);
+        if (rv != SECSuccess) {
+            goto loser;
+        }
     }
     memset(&p12ecx->innerBuf, 0, sizeof p12ecx->innerBuf);
     return SECSuccess;
@@ -1879,18 +1731,10 @@ sec_Pkcs12FinishMac(sec_PKCS12EncoderContext *p12ecx)
         goto loser;
     }
 
-    /* create the digest info */
-    di = SGN_CreateDigestInfo(p12ecx->p12exp->integrityInfo.pwdInfo.algorithm,
-                              hmacData, hmacLen);
-    if (!di) {
-        PORT_SetError(SEC_ERROR_NO_MEMORY);
-        rv = SECFailure;
-        goto loser;
-    }
-
-    rv = SGN_CopyDigestInfo(p12ecx->arena, &p12ecx->mac.safeMac, di);
+    /* finish the digest info, algorithm ID is already set */
+    rv = SECITEM_MakeItem(p12ecx->arena, &p12ecx->mac.safeMac.digest,
+                          hmacData, hmacLen);
     if (rv != SECSuccess) {
-        PORT_SetError(SEC_ERROR_NO_MEMORY);
         goto loser;
     }
 

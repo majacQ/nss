@@ -52,9 +52,11 @@ class TlsCipherSpec;
 struct TlsRecord;
 
 const extern std::vector<SSLNamedGroup> kAllDHEGroups;
+const extern std::vector<SSLNamedGroup> kNonPQDHEGroups;
 const extern std::vector<SSLNamedGroup> kECDHEGroups;
 const extern std::vector<SSLNamedGroup> kFFDHEGroups;
 const extern std::vector<SSLNamedGroup> kFasterDHEGroups;
+const extern std::vector<SSLNamedGroup> kEcdhHybridGroups;
 
 // These functions are called from callbacks.  They use bare pointers because
 // TlsAgent sets up the callback and it doesn't know who owns it.
@@ -85,9 +87,17 @@ class TlsAgent : public PollTarget {
   static const std::string kServerEcdhEcdsa;
   static const std::string kServerEcdhRsa;
   static const std::string kServerDsa;
+  static const std::string kServerMlDsa44;
+  static const std::string kServerMlDsa65;
+  static const std::string kServerMlDsa87;
+  static const std::string kServerUnknownExt;
+  static const std::string kServerUnknownCriticalExt;
   static const std::string kDelegatorEcdsa256;    // draft-ietf-tls-subcerts
   static const std::string kDelegatorRsae2048;    // draft-ietf-tls-subcerts
   static const std::string kDelegatorRsaPss2048;  // draft-ietf-tls-subcerts
+  static const std::string kDelegatorMlDsa44;     // draft-ietf-tls-subcerts
+  static const std::string kDelegatorMlDsa65;     // draft-ietf-tls-subcerts
+  static const std::string kDelegatorMlDsa87;     // draft-ietf-tls-subcerts
 
   TlsAgent(const std::string& name, Role role, SSLProtocolVariant variant);
   virtual ~TlsAgent();
@@ -206,6 +216,7 @@ class TlsAgent : public PollTarget {
   void ConfigNamedGroups(const std::vector<SSLNamedGroup>& groups);
   void EnableECDHEServerKeyReuse();
   bool GetPeerChainLength(size_t* count);
+  void CheckPeerChainFunctionConsistency();
   void CheckCipherSuite(uint16_t cipher_suite);
   void SetResumptionTokenCallback();
   bool MaybeSetResumptionToken();
@@ -560,6 +571,11 @@ class TlsAgentTestClient : public TlsAgentTestBase,
 };
 
 class TlsAgentTestClient13 : public TlsAgentTestClient {};
+
+class TlsAgentStreamTestClient13 : public TlsAgentTestClient {
+ public:
+  TlsAgentStreamTestClient13() { variant_ = ssl_variant_stream; }
+};
 
 class TlsAgentStreamTestClient : public TlsAgentTestBase {
  public:

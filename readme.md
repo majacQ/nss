@@ -9,11 +9,10 @@ standards.
 ## Getting started
 
 In order to get started create a new directory on that you will be uses as your
-local work area, and check out NSS and NSPR. (Note that there's no git mirror of
-NSPR and you require mercurial to get the latest NSPR source.)
+local work area, and check out NSS and NSPR.
 
-    git clone https://github.com/nss-dev/nss.git
-    hg clone https://hg.mozilla.org/projects/nspr
+    git clone https://github.com/mozilla/nss
+    git clone https://github.com/mozilla/nspr
 
 NSS can also be cloned with mercurial
 
@@ -43,6 +42,22 @@ directory, e.g., using the `LD_LIBRARY_PATH` or `DYLD_LIBRARY_PATH`.
 
 See [help.txt](https://hg.mozilla.org/projects/nss/raw-file/tip/help.txt) for
 more information on using build.sh.
+
+### Building for Android and iOS
+
+`--target-os` cross-compiles NSPR and NSS with the platform's own toolchain.
+Use a separate `--dist` directory for each target:
+
+    # Android: an NDK (r19 or later), on Linux or macOS
+    ./build.sh --target-os=android --android-ndk=$ANDROID_NDK_ROOT \
+        --android-api=21 -t arm64 --opt --static --dist=../dist-android-arm64
+
+    # iOS: Xcode, on macOS
+    ./build.sh --target-os=ios --ios-sdk=iphonesimulator -t arm64 \
+        --opt --static --dist=../dist-ios-sim-arm64
+
+Android supports `-t arm`, `arm64`, `x64` and `ia32`; iOS supports `-t arm64`
+and `x64` (simulator only). Both default to `arm64`.
 
 ## Building NSS (legacy build system)
 
@@ -97,7 +112,7 @@ e.g. `NSS_TESTS=ssl_gtests ./all.sh` or by changing into the according directory
 and running the bash script there `cd ssl_gtests && ./ssl_gtests.sh`.  The
 following tests are available:
 
-    cipher lowhash libpkix cert dbtests tools fips sdr crmf smime ssl ocsp merge pkits chains ec gtests ssl_gtests bogo policy
+    cipher lowhash libpkix cert dbtests tools fips sdr smime ssl ocsp merge pkits chains ec gtests ssl_gtests bogo policy
 
 To make tests run faster it's recommended to set `NSS_CYCLES=standard` to run
 only the standard cycle.

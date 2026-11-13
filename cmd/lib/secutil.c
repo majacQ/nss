@@ -42,17 +42,34 @@ static char consoleName[] = {
 #ifdef XP_UNIX
     "/dev/tty"
 #else
-#ifdef XP_OS2
-    "\\DEV\\CON"
-#else
     "CON:"
-#endif
 #endif
 };
 
+#include "cert.h"
 #include "nssutil.h"
 #include "ssl.h"
 #include "sslproto.h"
+#include "xconst.h"
+
+#define DEFN_EXTEN_EXT_VALUE_ENCODER(mmm)                                       \
+    SECStatus EXTEN_EXT_VALUE_ENCODER_##mmm(PLArenaPool *extHandleArena,        \
+                                            void *value, SECItem *encodedValue) \
+    {                                                                           \
+        return mmm(extHandleArena, value, encodedValue);                        \
+    }
+
+DEFN_EXTEN_EXT_VALUE_ENCODER(CERT_EncodeAltNameExtension)
+DEFN_EXTEN_EXT_VALUE_ENCODER(CERT_EncodeAuthKeyID)
+DEFN_EXTEN_EXT_VALUE_ENCODER(CERT_EncodeBasicConstraintValue)
+DEFN_EXTEN_EXT_VALUE_ENCODER(CERT_EncodeCRLDistributionPoints)
+DEFN_EXTEN_EXT_VALUE_ENCODER(CERT_EncodeCertPoliciesExtension)
+DEFN_EXTEN_EXT_VALUE_ENCODER(CERT_EncodeInfoAccessExtension)
+DEFN_EXTEN_EXT_VALUE_ENCODER(CERT_EncodeInhibitAnyExtension)
+DEFN_EXTEN_EXT_VALUE_ENCODER(CERT_EncodeNameConstraintsExtension)
+DEFN_EXTEN_EXT_VALUE_ENCODER(CERT_EncodePolicyConstraintsExtension)
+DEFN_EXTEN_EXT_VALUE_ENCODER(CERT_EncodePolicyMappingExtension)
+DEFN_EXTEN_EXT_VALUE_ENCODER(CERT_EncodeSubjectKeyID)
 
 static PRBool utf8DisplayEnabled = PR_FALSE;
 
@@ -1174,6 +1191,21 @@ SECU_PrintObjectID(FILE *out, const SECItem *oid, const char *m, int level)
     return SEC_OID_UNKNOWN;
 }
 
+void
+SECU_PrintOidTag(FILE *out, SECOidTag tag, const char *m, int level)
+{
+    const char *desc = SECOID_FindOIDTagDescription(tag);
+
+    if (desc == NULL) {
+        desc = SECOID_FindOIDTagDescription(SEC_OID_UNKNOWN);
+    }
+    SECU_Indent(out, level);
+    if (m != NULL) {
+        fprintf(out, "%s: ", m);
+    }
+    fprintf(out, "%s\n", desc);
+}
+
 typedef struct secuPBEParamsStr {
     SECItem salt;
     SECItem iterationCount;
@@ -1189,8 +1221,8 @@ const SEC_ASN1Template secuKDF2Params[] = {
     { SEC_ASN1_SEQUENCE, 0, NULL, sizeof(secuPBEParams) },
     { SEC_ASN1_OCTET_STRING, offsetof(secuPBEParams, salt) },
     { SEC_ASN1_INTEGER, offsetof(secuPBEParams, iterationCount) },
-    { SEC_ASN1_INTEGER, offsetof(secuPBEParams, keyLength) },
-    { SEC_ASN1_INLINE | SEC_ASN1_XTRN, offsetof(secuPBEParams, kdfAlg),
+    { SEC_ASN1_INTEGER | SEC_ASN1_OPTIONAL, offsetof(secuPBEParams, keyLength) },
+    { SEC_ASN1_INLINE | SEC_ASN1_XTRN | SEC_ASN1_OPTIONAL, offsetof(secuPBEParams, kdfAlg),
       SEC_ASN1_SUB(SECOID_AlgorithmIDTemplate) },
     { 0 }
 };
@@ -1301,8 +1333,15 @@ secu_PrintKDF2Params(FILE *out, SECItem *value, char *m, int level)
         SECU_PrintAsHex(out, &param.salt, "Salt", level + 1);
         SECU_PrintInteger(out, &param.iterationCount, "Iteration Count",
                           level + 1);
-        SECU_PrintInteger(out, &param.keyLength, "Key Length", level + 1);
-        SECU_PrintAlgorithmID(out, &param.kdfAlg, "KDF algorithm", level + 1);
+        if (param.keyLength.data != NULL) {
+            SECU_PrintInteger(out, &param.keyLength, "Key Length", level + 1);
+        }
+        if (param.kdfAlg.algorithm.data != NULL) {
+            SECU_PrintAlgorithmID(out, &param.kdfAlg, "KDF algorithm", level + 1);
+        } else {
+            SECU_Indent(out, level + 1);
+            fprintf(out, "Implicit KDF Algorithm: HMAC-SHA-1\n");
+        }
     }
     PORT_FreeArena(pool, PR_FALSE);
 }
@@ -1485,6 +1524,58 @@ SECU_PrintDSAPublicKey(FILE *out, SECKEYPublicKey *pk, char *m, int level)
     SECU_PrintInteger(out, &pk->u.dsa.publicValue, "PublicValue", level + 1);
 }
 
+void
+SECU_PrintMLDSAPublicKey(FILE *out, SECKEYPublicKey *pk, char *m, int level)
+{
+
+    SECU_Indent(out, level);
+    fprintf(out, "%s:\n", m);
+
+    SECU_PrintOidTag(out, pk->u.mldsa.paramSet, "Parameter Set", level + 1);
+    SECU_PrintInteger(out, &pk->u.mldsa.publicValue, "PublicValue", level + 1);
+}
+
+void
+SECU_PrintMLKEMPublicKey(FILE *out, SECKEYPublicKey *pk, char *m, int level)
+{
+
+    SECU_Indent(out, level);
+    fprintf(out, "%s:\n", m);
+
+    switch (pk->u.kyber.params) {
+        case params_ml_kem512:
+            SECU_PrintOidTag(out, SEC_OID_ML_KEM_512, "Parameter Set", level + 1);
+            break;
+        case params_ml_kem512_test_mode:
+            SECU_PrintOidTag(out, SEC_OID_ML_KEM_512, "Parameter Set (test mode)",
+                             level + 1);
+            break;
+        case params_ml_kem768:
+            SECU_PrintOidTag(out, SEC_OID_ML_KEM_768, "Parameter Set", level + 1);
+            break;
+        case params_ml_kem768_test_mode:
+            SECU_PrintOidTag(out, SEC_OID_ML_KEM_768, "Parameter Set (test mode)",
+                             level + 1);
+            break;
+        case params_ml_kem1024:
+            SECU_PrintOidTag(out, SEC_OID_ML_KEM_1024, "Parameter Set", level + 1);
+            break;
+        case params_ml_kem1024_test_mode:
+            SECU_PrintOidTag(out, SEC_OID_ML_KEM_1024, "Parameter Set (test mode)",
+                             level + 1);
+            break;
+        case params_kyber_invalid:
+            SECU_Indent(out, level);
+            fprintf(out, "Parameter Set: Invalid Params\n");
+            break;
+        default:
+            SECU_Indent(out, level);
+            fprintf(out, "Parameter Set: Invalid Params %d\n", pk->u.kyber.params);
+            break;
+    }
+    SECU_PrintInteger(out, &pk->u.kyber.publicValue, "PublicValue", level + 1);
+}
+
 static void
 secu_PrintSubjectPublicKeyInfo(FILE *out, PLArenaPool *arena,
                                CERTSubjectPublicKeyInfo *i, char *msg, int level)
@@ -1510,6 +1601,22 @@ secu_PrintSubjectPublicKeyInfo(FILE *out, PLArenaPool *arena,
                 secu_PrintECPublicKey(out, pk, "EC Public Key", level + 1);
                 break;
 
+            case ecMontKey:
+                secu_PrintECPublicKey(out, pk, "EC Montgomery Public Key", level + 1);
+                break;
+
+            case edKey:
+                secu_PrintECPublicKey(out, pk, "EC Edwards Public Key", level + 1);
+                break;
+
+            case mldsaKey:
+                SECU_PrintMLDSAPublicKey(out, pk, "ML-DSA Public Key", level + 1);
+                break;
+
+            case kyberKey:
+                SECU_PrintMLKEMPublicKey(out, pk, "ML-KEM Public Key", level + 1);
+                break;
+
             case dhKey:
             case fortezzaKey:
             case keaKey:
@@ -1518,7 +1625,7 @@ secu_PrintSubjectPublicKeyInfo(FILE *out, PLArenaPool *arena,
                 goto loser;
             default:
                 SECU_Indent(out, level);
-                fprintf(out, "unknown SPKI algorithm type\n");
+                fprintf(out, "unknown SPKI algorithm type %d\n", pk->keyType);
                 goto loser;
         }
         PORT_FreeArena(pk->arena, PR_FALSE);
@@ -1526,7 +1633,9 @@ secu_PrintSubjectPublicKeyInfo(FILE *out, PLArenaPool *arena,
         SECU_PrintErrMsg(out, level, "Error", "Parsing public key");
     loser:
         if (i->subjectPublicKey.data) {
-            SECU_PrintAny(out, &i->subjectPublicKey, "Raw", level);
+            SECItem tmp = i->subjectPublicKey;
+            DER_ConvertBitString(&tmp);
+            SECU_PrintAny(out, &tmp, "Raw", level);
         }
     }
 }
@@ -1544,7 +1653,7 @@ printStringWithoutCRLF(FILE *out, const char *str)
 }
 
 int
-SECU_PrintDumpDerIssuerAndSerial(FILE *out, SECItem *der, char *m,
+SECU_PrintDumpDerIssuerAndSerial(FILE *out, const SECItem *der, const char *m,
                                  int level)
 {
     PLArenaPool *arena = PORT_NewArena(DER_DEFAULT_CHUNKSIZE);
@@ -2377,7 +2486,7 @@ SECU_PrintCertAttributes(FILE *out, CERTAttribute **attrs, char *m, int level)
 
 /* sometimes a PRErrorCode, other times a SECStatus.  Sigh. */
 int
-SECU_PrintCertificateRequest(FILE *out, SECItem *der, char *m, int level)
+SECU_PrintCertificateRequest(FILE *out, const SECItem *der, const char *m, int level)
 {
     PLArenaPool *arena = PORT_NewArena(DER_DEFAULT_CHUNKSIZE);
     CERTCertificateRequest *cr;
@@ -2736,7 +2845,7 @@ secu_PrintSignerInfo(FILE *out, SEC_PKCS7SignerInfo *info,
    some */
 
 void
-SECU_PrintCRLInfo(FILE *out, CERTCrl *crl, char *m, int level)
+SECU_PrintCRLInfo(FILE *out, CERTCrl *crl, const char *m, int level)
 {
     CERTCrlEntry *entry;
     int iv;
@@ -2816,7 +2925,7 @@ secu_PrintPKCS7Signed(FILE *out, SEC_PKCS7SignedData *src,
         while ((aCert = src->rawCerts[iv++]) != NULL) {
             snprintf(om, sizeof(om), "Certificate (%x)", iv);
             rv = SECU_PrintSignedData(out, aCert, om, level + 2,
-                                      (SECU_PPFunc)SECU_PrintCertificate);
+                                      SECU_PrintCertificate);
             if (rv)
                 return rv;
         }
@@ -2943,7 +3052,7 @@ secu_PrintPKCS7SignedAndEnveloped(FILE *out,
         while ((aCert = src->rawCerts[iv++]) != NULL) {
             snprintf(om, sizeof(om), "Certificate (%x)", iv);
             rv = SECU_PrintSignedData(out, aCert, om, level + 2,
-                                      (SECU_PPFunc)SECU_PrintCertificate);
+                                      SECU_PrintCertificate);
             if (rv)
                 return rv;
         }
@@ -2983,7 +3092,7 @@ secu_PrintPKCS7SignedAndEnveloped(FILE *out,
 }
 
 int
-SECU_PrintCrl(FILE *out, SECItem *der, char *m, int level)
+SECU_PrintCrl(FILE *out, const SECItem *der, const char *m, int level)
 {
     PLArenaPool *arena = PORT_NewArena(DER_DEFAULT_CHUNKSIZE);
     CERTCrl *c = NULL;
@@ -3148,8 +3257,8 @@ secu_PrintPKCS12Bag(FILE *out, SECItem *item, const char *desc, int level)
     switch (bagTag) {
         case SEC_OID_PKCS12_V1_KEY_BAG_ID:
             /* Future we need to print out raw private keys. Not a priority since
-         * p12util can't create files with unencrypted private keys, but
-         * some tools can and do */
+             * p12util can't create files with unencrypted private keys, but
+             * some tools can and do */
             SECU_PrintAny(out, &bagValue, "Private Key", level);
             break;
         case SEC_OID_PKCS12_V1_PKCS8_SHROUDED_KEY_BAG_ID:
@@ -3180,10 +3289,10 @@ secu_PrintPKCS12Bag(FILE *out, SECItem *item, const char *desc, int level)
         case SEC_OID_PKCS12_SDSI_CERT_BAG:
             if (strcmp(desc, "Crl Bag") == 0) {
                 rv = SECU_PrintSignedData(out, &bagValue, NULL, level + 1,
-                                          (SECU_PPFunc)SECU_PrintCrl);
+                                          SECU_PrintCrl);
             } else {
                 rv = SECU_PrintSignedData(out, &bagValue, NULL, level + 1,
-                                          (SECU_PPFunc)SECU_PrintCertificate);
+                                          SECU_PrintCertificate);
             }
             break;
         case SEC_OID_PKCS12_V1_SAFE_CONTENTS_BAG_ID:
@@ -3562,7 +3671,7 @@ SEC_PrintCertificateAndTrust(CERTCertificate *cert,
     data.len = cert->derCert.len;
 
     rv = SECU_PrintSignedData(stdout, &data, label, 0,
-                              (SECU_PPFunc)SECU_PrintCertificate);
+                              SECU_PrintCertificate);
     if (rv) {
         return (SECFailure);
     }
@@ -3831,7 +3940,7 @@ SECU_SignAndEncodeCRL(CERTCertificate *issuer, CERTSignedCrl *signCrl,
         return SECFailure;
     }
 
-    algID = SEC_GetSignatureAlgorithmOidTag(caPrivateKey->keyType, hashAlgTag);
+    algID = SEC_GetSignatureAlgorithmOidTagByKey(caPrivateKey, NULL, hashAlgTag);
     if (algID == SEC_OID_UNKNOWN) {
         *resCode = noSignatureMatch;
         rv = SECFailure;
@@ -4172,41 +4281,44 @@ SECU_ParseSSLVersionRangeString(const char *input,
     return SECSuccess;
 }
 
+#define NAME_AND_LEN(s) sizeof(s) - 1, s
+static const struct SSLNamedGroupString {
+    int len;
+    char *name;
+    SSLNamedGroup grp;
+} sslNamedGroupStringArray[] = {
+    { NAME_AND_LEN("P256"), ssl_grp_ec_secp256r1 },
+    { NAME_AND_LEN("P384"), ssl_grp_ec_secp384r1 },
+    { NAME_AND_LEN("P521"), ssl_grp_ec_secp521r1 },
+    { NAME_AND_LEN("x25519"), ssl_grp_ec_curve25519 },
+    { NAME_AND_LEN("FF2048"), ssl_grp_ffdhe_2048 },
+    { NAME_AND_LEN("FF3072"), ssl_grp_ffdhe_3072 },
+    { NAME_AND_LEN("FF4096"), ssl_grp_ffdhe_4096 },
+    { NAME_AND_LEN("FF6144"), ssl_grp_ffdhe_6144 },
+    { NAME_AND_LEN("FF8192"), ssl_grp_ffdhe_8192 },
+    { NAME_AND_LEN("x25519mlkem768"), ssl_grp_kem_mlkem768x25519 },
+    { NAME_AND_LEN("secp256r1mlkem768"), ssl_grp_kem_secp256r1mlkem768 },
+    { NAME_AND_LEN("secp384r1mlkem1024"), ssl_grp_kem_secp384r1mlkem1024 },
+    // keep for compatibility
+    { NAME_AND_LEN("mlkem768x25519"), ssl_grp_kem_mlkem768x25519 },
+};
+
+static const size_t sslNamedGroupStringLen = PR_ARRAY_SIZE(sslNamedGroupStringArray);
+
 static SSLNamedGroup
 groupNameToNamedGroup(char *name)
 {
-    if (PL_strlen(name) == 4) {
-        if (!strncmp(name, "P256", 4)) {
-            return ssl_grp_ec_secp256r1;
-        }
-        if (!strncmp(name, "P384", 4)) {
-            return ssl_grp_ec_secp384r1;
-        }
-        if (!strncmp(name, "P521", 4)) {
-            return ssl_grp_ec_secp521r1;
-        }
-    }
-    if (PL_strlen(name) == 6) {
-        if (!strncmp(name, "x25519", 6)) {
-            return ssl_grp_ec_curve25519;
-        }
-        if (!strncmp(name, "FF2048", 6)) {
-            return ssl_grp_ffdhe_2048;
-        }
-        if (!strncmp(name, "FF3072", 6)) {
-            return ssl_grp_ffdhe_3072;
-        }
-        if (!strncmp(name, "FF4096", 6)) {
-            return ssl_grp_ffdhe_4096;
-        }
-        if (!strncmp(name, "FF6144", 6)) {
-            return ssl_grp_ffdhe_6144;
-        }
-        if (!strncmp(name, "FF8192", 6)) {
-            return ssl_grp_ffdhe_8192;
-        }
-    }
+    int len = PL_strlen(name);
+    int i;
 
+    for (i = 0; i < sslNamedGroupStringLen; i++) {
+        const struct SSLNamedGroupString *ngs = &sslNamedGroupStringArray[i];
+        if (len == ngs->len) {
+            if (!strncmp(name, ngs->name, len)) {
+                return ngs->grp;
+            }
+        }
+    }
     return ssl_grp_none;
 }
 
@@ -4273,39 +4385,129 @@ done:
     return SECSuccess;
 }
 
+const char *
+SECU_NamedGroupToGroupName(SSLNamedGroup grp)
+{
+    int i;
+    static char unknownBuf[32];
+
+    if (grp == ssl_grp_none) {
+        return "None";
+    }
+
+    for (i = 0; i < sslNamedGroupStringLen; i++) {
+        const struct SSLNamedGroupString *ngs = &sslNamedGroupStringArray[i];
+        if (grp == ngs->grp) {
+            return ngs->name;
+        }
+    }
+    snprintf(unknownBuf, sizeof(unknownBuf), "Unknown %04x\n", grp);
+
+    return unknownBuf;
+}
+
+const char *
+SECU_NamedGroupGetNextName(size_t i)
+{
+    if (i >= sslNamedGroupStringLen) {
+        return NULL;
+    }
+    return sslNamedGroupStringArray[i].name;
+}
+
+#define MAKE_SCHEME(x)                  \
+    {                                   \
+        sizeof(#x) - 1, #x, ssl_sig_##x \
+    }
+static const struct SSLSignatureSchemeString {
+    int len;
+    char *name;
+    SSLSignatureScheme scheme;
+} sslSignatureSchemeStringArray[] = {
+    MAKE_SCHEME(rsa_pkcs1_sha1),
+    MAKE_SCHEME(rsa_pkcs1_sha256),
+    MAKE_SCHEME(rsa_pkcs1_sha384),
+    MAKE_SCHEME(rsa_pkcs1_sha512),
+    MAKE_SCHEME(ecdsa_sha1),
+    MAKE_SCHEME(ecdsa_secp256r1_sha256),
+    MAKE_SCHEME(ecdsa_secp384r1_sha384),
+    MAKE_SCHEME(ecdsa_secp521r1_sha512),
+    MAKE_SCHEME(rsa_pss_rsae_sha256),
+    MAKE_SCHEME(rsa_pss_rsae_sha384),
+    MAKE_SCHEME(rsa_pss_rsae_sha512),
+    MAKE_SCHEME(ed25519),
+    MAKE_SCHEME(ed448),
+    MAKE_SCHEME(rsa_pss_pss_sha256),
+    MAKE_SCHEME(rsa_pss_pss_sha384),
+    MAKE_SCHEME(rsa_pss_pss_sha512),
+    MAKE_SCHEME(dsa_sha1),
+    MAKE_SCHEME(dsa_sha256),
+    MAKE_SCHEME(dsa_sha384),
+    MAKE_SCHEME(dsa_sha512),
+    MAKE_SCHEME(mldsa44),
+    MAKE_SCHEME(mldsa65),
+    MAKE_SCHEME(mldsa87),
+};
+
+static const size_t sslSignatureSchemeStringLen =
+    PR_ARRAY_SIZE(sslSignatureSchemeStringArray);
+
+const char *
+SECU_SignatureSchemeGetNextScheme(size_t i)
+{
+    if (i >= sslSignatureSchemeStringLen) {
+        return NULL;
+    }
+    return sslSignatureSchemeStringArray[i].name;
+}
+
+const char *
+SECU_SignatureSchemeName(SSLSignatureScheme scheme)
+{
+    int i;
+    static char unknownBuf[32];
+
+    if (scheme == ssl_sig_none) {
+        return "None";
+    }
+
+    for (i = 0; i < sslSignatureSchemeStringLen; i++) {
+        const struct SSLSignatureSchemeString *schemp =
+            &sslSignatureSchemeStringArray[i];
+        if (scheme == schemp->scheme) {
+            return schemp->name;
+        }
+    }
+
+    /* we don't include ssl_sig_rsa_pks1_sha1md5 in our list because we
+     * don't want to select it from the command line, but if you are using
+     * ssl3,  it's possible for this signataure scheme to pop out, so we
+     * want output it. The name is the same value tstclnt used for this
+     * scheme originally */
+    if (scheme == ssl_sig_rsa_pkcs1_sha1md5) {
+        return "RSA PKCS#1 SHA1+MD5";
+    }
+
+    snprintf(unknownBuf, sizeof(unknownBuf), "Unknown %04x\n", scheme);
+
+    return unknownBuf;
+}
+
 SSLSignatureScheme
 schemeNameToScheme(const char *name)
 {
-#define compareScheme(x)                                \
-    do {                                                \
-        if (!PORT_Strncmp(name, #x, PORT_Strlen(#x))) { \
-            return ssl_sig_##x;                         \
-        }                                               \
-    } while (0)
+    int len = PL_strlen(name);
+    int i;
 
-    compareScheme(rsa_pkcs1_sha1);
-    compareScheme(rsa_pkcs1_sha256);
-    compareScheme(rsa_pkcs1_sha384);
-    compareScheme(rsa_pkcs1_sha512);
-    compareScheme(ecdsa_sha1);
-    compareScheme(ecdsa_secp256r1_sha256);
-    compareScheme(ecdsa_secp384r1_sha384);
-    compareScheme(ecdsa_secp521r1_sha512);
-    compareScheme(rsa_pss_rsae_sha256);
-    compareScheme(rsa_pss_rsae_sha384);
-    compareScheme(rsa_pss_rsae_sha512);
-    compareScheme(ed25519);
-    compareScheme(ed448);
-    compareScheme(rsa_pss_pss_sha256);
-    compareScheme(rsa_pss_pss_sha384);
-    compareScheme(rsa_pss_pss_sha512);
-    compareScheme(dsa_sha1);
-    compareScheme(dsa_sha256);
-    compareScheme(dsa_sha384);
-    compareScheme(dsa_sha512);
-
-#undef compareScheme
-
+    for (i = 0; i < sslSignatureSchemeStringLen; i++) {
+        const struct SSLSignatureSchemeString *schemp =
+            &sslSignatureSchemeStringArray[i];
+        if (len == schemp->len) {
+            if (!strncmp(name, schemp->name, len)) {
+                return schemp->scheme;
+            }
+        }
+    }
     return ssl_sig_none;
 }
 

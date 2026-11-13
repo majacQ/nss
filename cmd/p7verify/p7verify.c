@@ -28,27 +28,6 @@ extern int fread(char *, size_t, size_t, FILE *);
 extern int fprintf(FILE *, char *, ...);
 #endif
 
-static HASH_HashType
-AlgorithmToHashType(SECAlgorithmID *digestAlgorithms)
-{
-
-    SECOidTag tag;
-
-    tag = SECOID_GetAlgorithmTag(digestAlgorithms);
-
-    switch (tag) {
-        case SEC_OID_MD2:
-            return HASH_AlgMD2;
-        case SEC_OID_MD5:
-            return HASH_AlgMD5;
-        case SEC_OID_SHA1:
-            return HASH_AlgSHA1;
-        default:
-            fprintf(stderr, "should never get here\n");
-            return HASH_AlgNULL;
-    }
-}
-
 static int
 DigestFile(unsigned char *digest, unsigned int *len, unsigned int maxLen,
            FILE *inFile, HASH_HashType hashType)
@@ -131,7 +110,8 @@ HashDecodeAndVerify(FILE *out, FILE *content, PRFileDesc *signature,
     SEC_PKCS7SignedData *signedData;
     HASH_HashType digestType;
     SECItem digest;
-    unsigned char buffer[32];
+    unsigned char buffer[HASH_LENGTH_MAX];
+    PRBool valid;
 
     if (SECU_ReadDERFromFile(&derdata, signature, PR_FALSE,
                              PR_FALSE) != SECSuccess) {
@@ -152,21 +132,24 @@ HashDecodeAndVerify(FILE *out, FILE *content, PRFileDesc *signature,
     signedData = cinfo->content.signedData;
 
     /* assume that there is only one digest algorithm for now */
-    digestType = AlgorithmToHashType(signedData->digestAlgorithms[0]);
+    digestType = HASH_GetHashTypeByOidTag(
+        SECOID_GetAlgorithmTag(signedData->digestAlgorithms[0]));
     if (digestType == HASH_AlgNULL) {
         fprintf(out, "Invalid hash algorithmID\n");
         return -1;
     }
 
     digest.data = buffer;
-    if (DigestFile(digest.data, &digest.len, 32, content, digestType)) {
+    if (DigestFile(digest.data, &digest.len, sizeof(buffer), content,
+                   digestType)) {
         SECU_PrintError(progName, "problem computing message digest");
         return -1;
     }
 
+    valid = SEC_PKCS7VerifyDetachedSignature(cinfo, usage, &digest, digestType,
+                                             PR_FALSE);
     fprintf(out, "Signature is ");
-    if (SEC_PKCS7VerifyDetachedSignature(cinfo, usage, &digest, digestType,
-                                         PR_FALSE))
+    if (valid)
         fprintf(out, "valid.\n");
     else
         fprintf(out, "invalid (Reason: %s).\n",
@@ -174,7 +157,7 @@ HashDecodeAndVerify(FILE *out, FILE *content, PRFileDesc *signature,
 
     SECITEM_FreeItem(&derdata, PR_FALSE);
     SEC_PKCS7DestroyContentInfo(cinfo);
-    return 0;
+    return valid ? 0 : -1;
 }
 
 int
@@ -206,7 +189,7 @@ main(int argc, char **argv)
                 break;
 
             case 'c':
-                contentFile = fopen(optstate->value, "r");
+                contentFile = fopen(optstate->value, "rb");
                 if (!contentFile) {
                     fprintf(stderr, "%s: unable to open \"%s\" for reading\n",
                             progName, optstate->value);
@@ -239,8 +222,8 @@ main(int argc, char **argv)
             case 'u': {
                 int usageType;
 
-                usageType = atoi(strdup(optstate->value));
-                if (usageType < certUsageSSLClient || usageType > certUsageAnyCA)
+                usageType = atoi(optstate->value);
+                if (usageType < certUsageSSLClient || usageType > certUsageIPsec)
                     return -1;
                 certUsage = (SECCertUsage)usageType;
                 break;

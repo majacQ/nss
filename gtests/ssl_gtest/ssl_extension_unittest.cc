@@ -9,14 +9,12 @@
 #include "sslerr.h"
 #include "sslproto.h"
 
-// This is only to get DTLS_1_3_DRAFT_VERSION
-#include "ssl3prot.h"
-
 #include <memory>
 
 #include "tls_connect.h"
 #include "tls_filter.h"
 #include "tls_parser.h"
+#include "pk11_import.h"
 
 namespace nss_test {
 
@@ -175,11 +173,7 @@ class TlsExtensionTest13
     if (variant_ == ssl_variant_datagram) {
       switch (version) {
         case SSL_LIBRARY_VERSION_TLS_1_3:
-#ifdef DTLS_1_3_DRAFT_VERSION
-          version = 0x7f00 | DTLS_1_3_DRAFT_VERSION;
-#else
           version = SSL_LIBRARY_VERSION_DTLS_1_3_WIRE;
-#endif
           break;
         case SSL_LIBRARY_VERSION_TLS_1_2:
           version = SSL_LIBRARY_VERSION_DTLS_1_2_WIRE;
@@ -658,7 +652,10 @@ TEST_P(TlsExtensionTest12, SignatureAlgorithmConfiguration) {
   }
 }
 
+#ifndef NSS_DISABLE_DSA
 // This only works on TLS 1.2, since it relies on DSA.
+// and doesn't work if we've disabled DSA (Reset(TlsAgent:kServerDSA) fail
+// because we don't have a DSA certificate)
 TEST_P(TlsExtensionTest12, SignatureAlgorithmDisableDSA) {
   const std::vector<SSLSignatureScheme> schemes = {
       ssl_sig_dsa_sha1, ssl_sig_dsa_sha256, ssl_sig_dsa_sha384,
@@ -707,6 +704,7 @@ TEST_P(TlsExtensionTest12, SignatureAlgorithmDisableDSA) {
   EXPECT_TRUE(ext2.Read(2, 2, &v));
   EXPECT_EQ(ssl_sig_rsa_pss_rsae_sha256, v);
 }
+#endif
 
 // Temporary test to verify that we choke on an empty ClientKeyShare.
 // This test will fail when we implement HelloRetryRequest.
@@ -960,8 +958,8 @@ TEST_F(TlsExtensionTest13Stream, ResumeIncorrectBinderLength) {
       client_, [](TlsPreSharedKeyReplacer* r) {
         r->binders_[0].Write(r->binders_[0].len(), 0xff, 1);
       });
-  ConnectExpectAlert(server_, kTlsAlertIllegalParameter);
-  client_->CheckErrorCode(SSL_ERROR_ILLEGAL_PARAMETER_ALERT);
+  ConnectExpectAlert(server_, kTlsAlertDecodeError);
+  client_->CheckErrorCode(SSL_ERROR_DECODE_ERROR_ALERT);
   server_->CheckErrorCode(SSL_ERROR_RX_MALFORMED_CLIENT_HELLO);
 }
 
@@ -1097,27 +1095,12 @@ TEST_P(TlsExtensionTest13, RemoveTls13FromVersionListBothV12) {
                            SSL_LIBRARY_VERSION_TLS_1_3);
   server_->SetVersionRange(SSL_LIBRARY_VERSION_TLS_1_2,
                            SSL_LIBRARY_VERSION_TLS_1_3);
-// The downgrade check is disabled in DTLS 1.3, so all that happens when we
-// tamper with the supported versions is that the Finished check fails.
-#ifdef DTLS_1_3_DRAFT_VERSION
-  if (variant_ == ssl_variant_datagram) {
-    ExpectAlert(server_, kTlsAlertDecryptError);
-  } else
-#endif
-  {
-    ExpectAlert(client_, kTlsAlertIllegalParameter);
-  }
+  // The downgrade check is disabled in DTLS 1.3, so all that happens when we
+  // tamper with the supported versions is that the Finished check fails.
+  ExpectAlert(client_, kTlsAlertIllegalParameter);
   ConnectWithReplacementVersionList(SSL_LIBRARY_VERSION_TLS_1_2);
-#ifdef DTLS_1_3_DRAFT_VERSION
-  if (variant_ == ssl_variant_datagram) {
-    client_->CheckErrorCode(SSL_ERROR_DECRYPT_ERROR_ALERT);
-    server_->CheckErrorCode(SSL_ERROR_BAD_HANDSHAKE_HASH_VALUE);
-  } else
-#endif
-  {
-    client_->CheckErrorCode(SSL_ERROR_RX_MALFORMED_SERVER_HELLO);
-    server_->CheckErrorCode(SSL_ERROR_ILLEGAL_PARAMETER_ALERT);
-  }
+  client_->CheckErrorCode(SSL_ERROR_RX_MALFORMED_SERVER_HELLO);
+  server_->CheckErrorCode(SSL_ERROR_ILLEGAL_PARAMETER_ALERT);
 }
 
 TEST_P(TlsExtensionTest13, HrrThenRemoveSignatureAlgorithms) {
@@ -1332,6 +1315,9 @@ TEST_P(TlsDisallowedUnadvertisedExtensionTest13,
 
 TEST_P(TlsConnectStream, IncludePadding) {
   EnsureTlsSetup();
+  // filters only work with particular groups
+  client_->ConfigNamedGroups(kNonPQDHEGroups);
+
   SSL_EnableTls13GreaseEch(client_->ssl_fd(), PR_FALSE);  // Don't GREASE
 
   // This needs to be long enough to push a TLS 1.0 ClientHello over 255, but
@@ -1377,8 +1363,8 @@ TEST_F(TlsConnectStreamTls13, ClientHelloExtensionPermutationWithPSK) {
   psk_item.len = sizeof(kPskDummyVal_);
   psk_item.data = const_cast<uint8_t*>(kPskDummyVal_);
   PK11SymKey* key =
-      PK11_ImportSymKey(slot.get(), CKM_HKDF_KEY_GEN, PK11_OriginUnwrap,
-                        CKA_DERIVE, &psk_item, NULL);
+      nss_test::ImportSymKey(slot.get(), CKM_HKDF_KEY_GEN, PK11_OriginUnwrap,
+                             CKA_DERIVE, &psk_item, NULL);
 
   ScopedPK11SymKey scoped_psk_(key);
   const std::string kPskDummyLabel_ = "NSS PSK GTEST label";
@@ -1390,7 +1376,7 @@ TEST_F(TlsConnectStreamTls13, ClientHelloExtensionPermutationWithPSK) {
                             PR_TRUE) == SECSuccess);
   Connect();
   SendReceive();
-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_psk, ssl_sig_none);
+  CheckKeys(ssl_auth_psk, ssl_sig_none);
 }
 
 /* This test checks that the ClientHello extension order is actually permuted

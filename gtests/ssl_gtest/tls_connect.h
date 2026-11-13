@@ -9,6 +9,8 @@
 
 #include <tuple>
 
+#include "ssl.h"
+#include "sslexp.h"
 #include "sslproto.h"
 #include "sslt.h"
 #include "nss.h"
@@ -83,12 +85,24 @@ class TlsConnectTestBase : public ::testing::Test {
   void ConnectWithCipherSuite(uint16_t cipher_suite);
   void CheckEarlyDataLimit(const std::shared_ptr<TlsAgent>& agent,
                            size_t expected_size);
+  // Get the default KEA for our tls version
+  SSLKEAType GetDefaultKEA(void) const;
+  // Get the default auth for our tls version
+  SSLAuthType GetDefaultAuth(void) const;
+  // Find the default group for a given KEA
+  SSLNamedGroup GetDefaultGroupFromKEA(SSLKEAType kea_type) const;
+  // Find the default scheam for a given auth
+  SSLSignatureScheme GetDefaultSchemeFromAuth(SSLAuthType auth_type) const;
+
   // Check that the keys used in the handshake match expectations.
   void CheckKeys(SSLKEAType kea_type, SSLNamedGroup kea_group,
                  SSLAuthType auth_type, SSLSignatureScheme sig_scheme) const;
-  // This version guesses some of the values.
+  // These version guesses some of the values based on defaults
+  void CheckKeys(SSLKEAType kea_type, SSLNamedGroup kea_group) const;
+  void CheckKeys(SSLAuthType auth_type, SSLSignatureScheme sig_scheme) const;
   void CheckKeys(SSLKEAType kea_type, SSLAuthType auth_type) const;
-  // This version assumes defaults.
+  void CheckKeys(SSLKEAType kea_type) const;
+  void CheckKeys(SSLAuthType auth_type) const;
   void CheckKeys() const;
   // Check that keys on resumed sessions.
   void CheckKeysResumption(SSLKEAType kea_type, SSLNamedGroup kea_group,
@@ -103,6 +117,7 @@ class TlsConnectTestBase : public ::testing::Test {
 
   void ConfigureVersion(uint16_t version);
   void SetExpectedVersion(uint16_t version);
+  uint16_t GetVersion(void) const { return version_; };
   // Expect resumption of a particular type.
   void ExpectResumption(SessionResumptionMode expected,
                         uint8_t num_resumed = 1);
@@ -156,7 +171,8 @@ class TlsConnectTestBase : public ::testing::Test {
                 std::shared_ptr<TlsAgent>& server,
                 HpkeKemId kem_id = HpkeDhKemX25519Sha256,
                 bool expect_ech = true, bool set_client_config = true,
-                bool set_server_config = true, int maxConfigSize = 100);
+                bool set_server_config = true, int maxConfigSize = 100,
+                bool compress_xtns = true);
 
  protected:
   SSLProtocolVariant variant_;
@@ -272,18 +288,30 @@ class TlsConnectGenericResumption
   bool use_external_cache() const { return external_cache_; }
 };
 
+// Which resumption token format the client emits.
+enum class TokenShape { kWrapped, kPlaintext };
+
+// Applies |shape| to |fd| via the resumption token options.
+void SetTokenShape(PRFileDesc* fd, TokenShape shape);
+
 class TlsConnectTls13ResumptionToken
     : public TlsConnectTestBase,
-      public ::testing::WithParamInterface<SSLProtocolVariant> {
+      public ::testing::WithParamInterface<
+          std::tuple<SSLProtocolVariant, TokenShape>> {
  public:
   TlsConnectTls13ResumptionToken();
 
   virtual void EnsureTlsSetup() {
     TlsConnectTestBase::EnsureTlsSetup();
     client_->SetResumptionTokenCallback();
+    SetTokenShape(client_->ssl_fd(), shape_);
   }
+
+ protected:
+  TokenShape shape_;
 };
 
+// Resumption token tests whose assertions do not depend on the token format.
 class TlsConnectGenericResumptionToken
     : public TlsConnectTestBase,
       public ::testing::WithParamInterface<
@@ -295,6 +323,44 @@ class TlsConnectGenericResumptionToken
     TlsConnectTestBase::EnsureTlsSetup();
     client_->SetResumptionTokenCallback();
   }
+};
+
+// Resumption token tests that depend on the master secret representation, so
+// they run over every token shape.
+class TlsConnectResumptionTokenShape
+    : public TlsConnectTestBase,
+      public ::testing::WithParamInterface<
+          std::tuple<SSLProtocolVariant, uint16_t, TokenShape>> {
+ public:
+  TlsConnectResumptionTokenShape();
+
+  virtual void EnsureTlsSetup() {
+    TlsConnectTestBase::EnsureTlsSetup();
+    client_->SetResumptionTokenCallback();
+    SetTokenShape(client_->ssl_fd(), shape_);
+  }
+  TokenShape shape() const { return shape_; }
+
+ protected:
+  TokenShape shape_;
+};
+
+class TlsConnectStreamTls13TokenHeader
+    : public TlsConnectTestBase,
+      public ::testing::WithParamInterface<TokenShape> {
+ public:
+  TlsConnectStreamTls13TokenHeader()
+      : TlsConnectTestBase(ssl_variant_stream, SSL_LIBRARY_VERSION_TLS_1_3),
+        shape_(GetParam()) {}
+
+  virtual void EnsureTlsSetup() {
+    TlsConnectTestBase::EnsureTlsSetup();
+    client_->SetResumptionTokenCallback();
+    SetTokenShape(client_->ssl_fd(), shape_);
+  }
+
+ protected:
+  TokenShape shape_;
 };
 
 // A Pre TLS 1.2 generic test.

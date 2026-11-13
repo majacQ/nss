@@ -17,7 +17,7 @@
         'errstrs.c',
         'nssb64d.c',
         'nssb64e.c',
-        'nssilock.c',
+        'nsshash.c',
         'nssrwlk.c',
         'oidstring.c',
         'pkcs1sig.c',

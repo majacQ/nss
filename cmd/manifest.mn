@@ -22,6 +22,7 @@ endif
 ifndef NSS_BUILD_UTIL_ONLY
 SOFTOKEN_SRCDIRS = \
  $(BLTEST_SRCDIR) \
+ $(DBTOOL_SRCDIR) \
  $(ECPERF_SRCDIR) \
  $(FREEBL_ECTEST_SRCDIR) \
  $(FIPSTEST_SRCDIR)  \
@@ -39,7 +40,6 @@ NSS_SRCDIRS = \
  certutil  \
  chktest  \
  crlutil  \
- crmftest \
  dbtest \
  derdump  \
  digest  \
@@ -48,6 +48,7 @@ NSS_SRCDIRS = \
  makepqg  \
  multinit \
  nss-policy-check \
+ nssdefaults \
  ocspclnt  \
  ocspresp \
  oidcalc  \
@@ -68,7 +69,6 @@ NSS_SRCDIRS = \
  sdbthreadtst \
  sdrtest \
  selfserv  \
- signtool \
  signver \
  smimetools  \
  ssltap  \
@@ -101,12 +101,8 @@ TEMPORARILY_DONT_BUILD = \
 
 # rsaperf  \
 #
-#       needs to look at what needs to happen to make jar build in
-# the binary release environment.
-#
 # perror requires lib/strerror.c which requires the client code installed 
 # to build (requires allxpstr.h)
 #
-DONT_BULD = jar \
- perror \
+DONT_BULD = perror \
 $(NULL)

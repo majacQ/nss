@@ -47,8 +47,8 @@ jpake_Sign(PLArenaPool *arena, const PQGParams *pqg, HASH_HashType hashType,
                                      NULL, &gx, &gv, &r),
                           CKR_MECHANISM_PARAM_INVALID);
     if (crv == CKR_OK) {
-        if ((out->pGX != NULL && out->ulGXLen >= gx.len) ||
-            (out->pGV != NULL && out->ulGVLen >= gv.len) ||
+        if ((out->pGX != NULL && out->ulGXLen >= gx.len) &&
+            (out->pGV != NULL && out->ulGVLen >= gv.len) &&
             (out->pR != NULL && out->ulRLen >= r.len)) {
             PORT_Memcpy(out->pGX, gx.data, gx.len);
             PORT_Memcpy(out->pGV, gv.data, gv.len);
@@ -147,7 +147,7 @@ jpake_Round1(HASH_HashType hashType, CK_NSS_JPAKERound1Params *params,
 
     arena = PORT_NewArena(NSS_SOFTOKEN_DEFAULT_CHUNKSIZE);
     if (arena == NULL)
-        crv = CKR_HOST_MEMORY;
+        return CKR_HOST_MEMORY;
 
     crv = sftk_MultipleAttribute2SecItem(arena, key, templateAttrs,
                                          NUM_ELEM(templateAttrs));
@@ -224,7 +224,7 @@ jpake_Round2(HASH_HashType hashType, CK_NSS_JPAKERound2Params *params,
 
     arena = PORT_NewArena(NSS_SOFTOKEN_DEFAULT_CHUNKSIZE);
     if (arena == NULL)
-        crv = CKR_HOST_MEMORY;
+        return CKR_HOST_MEMORY;
 
     /* TODO: check CKK_NSS_JPAKE_ROUND1 */
 
@@ -317,7 +317,7 @@ jpake_Final(HASH_HashType hashType, const CK_NSS_JPAKEFinalParams *param,
 
     arena = PORT_NewArena(NSS_SOFTOKEN_DEFAULT_CHUNKSIZE);
     if (arena == NULL)
-        crv = CKR_HOST_MEMORY;
+        return CKR_HOST_MEMORY;
 
     /* TODO: verify key type CKK_NSS_JPAKE_ROUND2 */
 
